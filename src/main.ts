@@ -284,6 +284,9 @@ function boot(): void {
     game.render();
   };
 
+  // Debug handle. The headless smoke test drives the game through this.
+  (window as unknown as { __RZA: unknown }).__RZA = { game, audio, settings };
+
   bootScreen.classList.add('hidden');
   game.onStateChange('menu');
   game.state = 'menu';

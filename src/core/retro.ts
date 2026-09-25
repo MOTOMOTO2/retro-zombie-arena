@@ -23,10 +23,10 @@ export type RetroQuality = {
 };
 
 export const QUALITY_PRESETS: Record<string, RetroQuality> = {
-  ps1: { height: 200, levels: 8, dither: 1, scanlines: 0.5, vignette: 0.65, bleed: 1 },
-  dos: { height: 240, levels: 12, dither: 0.85, scanlines: 0.38, vignette: 0.55, bleed: 0.7 },
-  y2k: { height: 360, levels: 24, dither: 0.5, scanlines: 0.22, vignette: 0.45, bleed: 0.4 },
-  crisp: { height: 540, levels: 48, dither: 0.25, scanlines: 0.1, vignette: 0.3, bleed: 0.15 },
+  ps1: { height: 200, levels: 8, dither: 1, scanlines: 0.34, vignette: 0.42, bleed: 1 },
+  dos: { height: 240, levels: 14, dither: 0.85, scanlines: 0.26, vignette: 0.34, bleed: 0.7 },
+  y2k: { height: 360, levels: 24, dither: 0.5, scanlines: 0.16, vignette: 0.28, bleed: 0.4 },
+  crisp: { height: 540, levels: 48, dither: 0.25, scanlines: 0.08, vignette: 0.22, bleed: 0.15 },
 };
 
 const VERT = /* glsl */ `
@@ -233,6 +233,16 @@ export class RetroPipeline {
 
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.quadScene, this.quadCamera);
+  }
+
+  /**
+   * Reads the low-resolution buffer back to the CPU. Only used by the headless
+   * smoke test, which asserts the world actually rasterised something.
+   */
+  readFrame(): { width: number; height: number; pixels: Uint8Array } {
+    const pixels = new Uint8Array(this.bufferW * this.bufferH * 4);
+    this.renderer.readRenderTargetPixels(this.target, 0, 0, this.bufferW, this.bufferH, pixels);
+    return { width: this.bufferW, height: this.bufferH, pixels };
   }
 
   dispose(): void {

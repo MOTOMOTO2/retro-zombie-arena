@@ -187,8 +187,9 @@ html, body {
   opacity: 0;
   pointer-events: none;
   background: radial-gradient(ellipse at center, transparent 30%, rgba(120, 0, 0, 0.85) 95%);
-  animation: pulse 1.1s ease-in-out infinite;
 }
+/* Keyframes outrank inline styles, so the pulse only exists while wounded. */
+#low-health.on { animation: pulse 1.1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.45; } }
 
 #prompt {

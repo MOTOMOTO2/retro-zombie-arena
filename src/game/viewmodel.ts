@@ -42,12 +42,12 @@ export class ViewModel {
   constructor() {
     this.camera = new THREE.PerspectiveCamera(58, 1.6, 0.01, 12);
     this.scene.add(this.holder);
-    this.scene.add(new THREE.AmbientLight(0xb9c4d0, 1.35));
+    this.scene.add(new THREE.AmbientLight(0xb9c4d0, 2.9));
 
-    const key = new THREE.DirectionalLight(0xfff0d0, 1.5);
+    const key = new THREE.DirectionalLight(0xfff0d0, 3.4);
     key.position.set(-0.6, 1, 0.6);
     this.scene.add(key);
-    const rim = new THREE.DirectionalLight(0x5f7fb0, 0.75);
+    const rim = new THREE.DirectionalLight(0x5f7fb0, 1.9);
     rim.position.set(0.8, -0.3, -1);
     this.scene.add(rim);
 
@@ -76,7 +76,7 @@ export class ViewModel {
     this.flash.visible = false;
     this.holder.add(this.flash);
 
-    this.flashLight = new THREE.PointLight(0xffc870, 0, 4);
+    this.flashLight = new THREE.PointLight(0xffc870, 0, 5, 2);
     this.holder.add(this.flashLight);
   }
 
@@ -156,7 +156,7 @@ export class ViewModel {
       this.flashTimer -= dt;
       const mat = this.flash.material as THREE.MeshBasicMaterial;
       mat.opacity = Math.max(0, this.flashTimer / 0.055);
-      this.flashLight.intensity = mat.opacity * 5;
+      this.flashLight.intensity = mat.opacity * 22;
       if (this.flashTimer <= 0) {
         this.flash.visible = false;
         this.flashLight.intensity = 0;

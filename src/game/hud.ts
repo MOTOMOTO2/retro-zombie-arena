@@ -106,7 +106,9 @@ export class Hud {
     const pct = Math.max(0, Math.min(1, fraction)) * 100;
     this.healthBar.style.width = `${pct}%`;
     this.healthBar.classList.toggle('hurt', fraction < 0.4);
-    this.lowHealthEl.style.opacity = fraction < 0.35 ? String((0.35 - fraction) * 2.4) : '0';
+    const wounded = fraction < 0.35;
+    this.lowHealthEl.classList.toggle('on', wounded);
+    this.lowHealthEl.style.opacity = wounded ? String((0.35 - fraction) * 2.4) : '0';
   }
 
   setStamina(fraction: number): void {

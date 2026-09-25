@@ -115,8 +115,8 @@ function bakeLights(): BakeLight[] {
           y: WALL_H - 1.1,
           z: (z + 0.5) * TILE,
           color: new THREE.Color(zone.lightColor),
-          intensity: rng.range(1.5, 2.0),
-          radius: 22,
+          intensity: rng.range(5.0, 6.2),
+          radius: 30,
         });
       }
     }
@@ -132,8 +132,8 @@ function bakeLights(): BakeLight[] {
         y: WALL_H - 1.4,
         z: (c.z + (c.h >= c.w ? t * c.h : c.h / 2)) * TILE,
         color: new THREE.Color(CORRIDOR_LIGHT),
-        intensity: 1.25,
-        radius: 15,
+        intensity: 4.0,
+        radius: 22,
       });
     }
   }
@@ -160,8 +160,9 @@ function applyBake(batch: Batch, lights: BakeLight[], tint: THREE.Color, ambient
       if (d2 > L.radius * L.radius) continue;
       const d = Math.sqrt(d2) || 1e-4;
       const lambert = Math.max(0, (dx * n.x + dy * n.y + dz * n.z) / d);
-      // Wrapped lighting keeps back faces from going pitch black.
-      const wrapped = lambert * 0.82 + 0.18;
+      // Heavily wrapped lighting: it stands in for the bounce a real radiosity
+      // bake would give, and it is what keeps walls and ceilings off pure black.
+      const wrapped = lambert * 0.6 + 0.4;
       const atten = Math.max(0, 1 - d / L.radius);
       const f = wrapped * atten * atten * L.intensity;
       acc.r += L.color.r * f;
@@ -169,9 +170,9 @@ function applyBake(batch: Batch, lights: BakeLight[], tint: THREE.Color, ambient
       acc.b += L.color.b * f;
     }
 
-    batch.col[i * 3] = Math.min(1.35, acc.r);
-    batch.col[i * 3 + 1] = Math.min(1.35, acc.g);
-    batch.col[i * 3 + 2] = Math.min(1.35, acc.b);
+    batch.col[i * 3] = Math.min(2.6, acc.r);
+    batch.col[i * 3 + 1] = Math.min(2.6, acc.g);
+    batch.col[i * 3 + 2] = Math.min(2.6, acc.b);
   }
 }
 
@@ -216,13 +217,13 @@ export function buildLevel(map: Uint8Array): BuiltLevel {
       const z1 = z0 + TILE;
 
       // Floor.
-      getBatch(`floor${s.floor.id}`, s.floor, s.tint, 0.2).quad(
+      getBatch(`floor${s.floor.id}`, s.floor, s.tint, 0.86).quad(
         v(x0, 0, z1), v(x1, 0, z1), v(x1, 0, z0), v(x0, 0, z0),
         v(0, 1, 0), 1, 1,
       );
 
       // Ceiling.
-      getBatch('ceil', tex.ceiling, s.tint, 0.12).quad(
+      getBatch('ceil', tex.ceiling, s.tint, 0.72).quad(
         v(x0, WALL_H, z0), v(x1, WALL_H, z0), v(x1, WALL_H, z1), v(x0, WALL_H, z1),
         v(0, -1, 0), 1, 1,
       );
@@ -244,7 +245,7 @@ export function buildLevel(map: Uint8Array): BuiltLevel {
         const nz = tz + dz;
         const nt = nx < 0 || nz < 0 || nx >= MAP_W || nz >= MAP_H ? 0 : map[nz * MAP_W + nx];
         if (isOpenTile(nt)) continue;
-        getBatch(`wall${s.wall.id}`, s.wall, s.tint, 0.16).quad(
+        getBatch(`wall${s.wall.id}`, s.wall, s.tint, 0.9).quad(
           corners[0], corners[1], corners[2], corners[3], normal, 1, wallRepeatY,
         );
       }
@@ -288,18 +289,18 @@ export function buildLevel(map: Uint8Array): BuiltLevel {
 export function zoneFogColor(zone: ZoneId | null): THREE.Color {
   switch (zone) {
     case 'furnace':
-      return new THREE.Color(0x1a0d08);
+      return new THREE.Color(0x3a1c10);
     case 'chapel':
-      return new THREE.Color(0x0a0e18);
+      return new THREE.Color(0x161d32);
     case 'armory':
-      return new THREE.Color(0x101208);
+      return new THREE.Color(0x242812);
     case 'catacombs':
-      return new THREE.Color(0x0c0a14);
+      return new THREE.Color(0x1a1530);
     case 'power':
-      return new THREE.Color(0x061210);
+      return new THREE.Color(0x0c2422);
     case 'lobby':
-      return new THREE.Color(0x120f0a);
+      return new THREE.Color(0x2a2214);
     default:
-      return new THREE.Color(0x0a0a0c);
+      return new THREE.Color(0x17161a);
   }
 }

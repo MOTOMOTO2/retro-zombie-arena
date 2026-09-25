@@ -217,7 +217,7 @@ export class PerkMachine {
     sign.position.set(0, 3.9, -0.4);
     this.group.add(sign);
 
-    this.light = new THREE.PointLight(info.color, 0, 11, 1.6);
+    this.light = new THREE.PointLight(info.color, 0, 14, 2);
     this.light.position.set(0, 3.2, -1.2);
     this.group.add(this.light);
 
@@ -231,13 +231,13 @@ export class PerkMachine {
     const info = PERK_INFO[this.id];
     this.signMat.color.set(on ? info.color : 0x1a1a1a);
     this.bodyMat.color.set(on ? 0x33373d : 0x23262b);
-    this.light.intensity = on ? 1.4 : 0;
+    this.light.intensity = on ? 20 : 0;
   }
 
   /** Gentle pulse so a powered machine catches the eye across a dark room. */
   animate(t: number): void {
     if (!this.powered) return;
-    this.light.intensity = 1.2 + Math.sin(t * 3.1) * 0.35;
+    this.light.intensity = 18 + Math.sin(t * 3.1) * 5;
   }
 }
 
@@ -298,7 +298,7 @@ export class MysteryBox {
     this.beam.position.y = 4.2;
     this.group.add(this.beam);
 
-    this.light = new THREE.PointLight(0xffc44d, 0, 14, 1.8);
+    this.light = new THREE.PointLight(0xffc44d, 0, 18, 2);
     this.light.position.y = 2.2;
     this.group.add(this.light);
   }
@@ -326,7 +326,7 @@ export class MysteryBox {
     this.lid.rotation.x = -openAmount * 1.9;
     const mat = this.beam.material as THREE.MeshBasicMaterial;
     mat.opacity = openAmount * 0.16;
-    this.light.intensity = openAmount * 2.6;
+    this.light.intensity = openAmount * 34;
   }
 
   animate(t: number, spin: number): void {
@@ -465,7 +465,7 @@ export class PackMachine {
     this.holder.position.set(0, 2.2, -1.9);
     this.group.add(this.holder);
 
-    this.light = new THREE.PointLight(0x48f0c0, 0, 12, 1.7);
+    this.light = new THREE.PointLight(0x48f0c0, 0, 16, 2);
     this.light.position.set(0, 2.6, -1.6);
     this.group.add(this.light);
 
@@ -476,7 +476,7 @@ export class PackMachine {
   setPowered(on: boolean): void {
     this.powered = on;
     this.glowMat.color.set(on ? 0x48f0c0 : 0x1d2a2a);
-    this.light.intensity = on ? 1.6 : 0;
+    this.light.intensity = on ? 24 : 0;
   }
 
   /** Shows the weapon being worked on, or null when the mouth is empty. */
@@ -494,7 +494,7 @@ export class PackMachine {
   animate(t: number): void {
     if (!this.powered) return;
     this.drum.rotation.x = t * 1.4;
-    this.light.intensity = 1.4 + Math.sin(t * 5.5) * 0.4;
+    this.light.intensity = 22 + Math.sin(t * 5.5) * 6;
     this.holder.rotation.y = t * 2.2;
     this.holder.position.y = 2.2 + Math.sin(t * 3) * 0.08;
   }

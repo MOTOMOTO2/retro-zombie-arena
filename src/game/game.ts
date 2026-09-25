@@ -118,7 +118,7 @@ export class Game {
   private readonly particles = new ParticleField(1200, 0.2);
   private readonly rng = new Rng(Date.now() >>> 0);
   private readonly torch: THREE.PointLight;
-  private readonly fog = new THREE.Fog(0x0a0a0c, 6, 74);
+  private readonly fog = new THREE.Fog(0x0a0a0c, 11, 96);
 
   private readonly tracers: THREE.Mesh[] = [];
   private readonly tracerLife: number[] = [];
@@ -180,9 +180,14 @@ export class Game {
 
     this.scene.fog = this.fog;
     this.scene.background = new THREE.Color(0x05060a);
-    this.scene.add(new THREE.AmbientLight(0x2a2e38, 0.55));
-    const hemi = new THREE.HemisphereLight(0x394050, 0x14100c, 0.5);
-    this.scene.add(hemi);
+    // The level carries its lighting in its vertex colours, so ambient sits at
+    // full strength and simply reproduces the bake. Dynamic objects read as
+    // flat-lit against it - which is exactly how the era looked - and the
+    // player's torch plus the machine lights give them their shape up close.
+    // Intensity of PI exactly cancels the Lambert 1/PI term, so a surface with
+    // a baked vertex colour of 1.0 renders at its full texture value.
+    this.scene.add(new THREE.AmbientLight(0xffffff, Math.PI));
+    this.scene.add(new THREE.HemisphereLight(0x8fa0c0, 0x2e2318, 0.38));
 
     const level = buildLevel(tiles);
     this.scene.add(level.group);
@@ -199,7 +204,7 @@ export class Game {
     this.scene.add(this.pool.group);
     this.scene.add(this.particles.points);
 
-    this.torch = new THREE.PointLight(0xffd9a8, 1.5, 26, 1.5);
+    this.torch = new THREE.PointLight(0xffd2a0, 46, 30, 2);
     this.scene.add(this.torch);
 
     this.buildTracerPool();
@@ -828,7 +833,7 @@ export class Game {
     }
 
     const group = proto.clone();
-    const light = new THREE.PointLight(POWERUPS[id].color, 2.2, 12, 1.8);
+    const light = new THREE.PointLight(POWERUPS[id].color, 26, 16, 2);
     group.add(light);
     group.position.set(x, 1.4, z);
     this.scene.add(group);
@@ -1581,7 +1586,7 @@ export class Game {
     this.camera.updateProjectionMatrix();
 
     this.torch.position.copy(this.camera.position);
-    this.torch.intensity = 1.3 + Math.sin(this.elapsed * 9) * 0.06;
+    this.torch.intensity = 44 + Math.sin(this.elapsed * 9) * 2.5;
 
     // Fog colour eases toward whichever room the player is standing in.
     const { tx, tz } = worldToTile(p.x, p.z);

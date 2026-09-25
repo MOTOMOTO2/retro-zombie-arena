@@ -177,7 +177,7 @@ export const BOX_PADS: { zone: ZoneId; tx: number; tz: number }[] = [
 ];
 
 /** Flipping the power switch enables the perk machines and the service lift. */
-export const POWER_SWITCH = { zone: 'power' as ZoneId, tx: 43, tz: 7, facing: -Math.PI / 2 };
+export const POWER_SWITCH = { zone: 'power' as ZoneId, tx: 44, tz: 7, facing: -Math.PI / 2 };
 
 export const PLAYER_SPAWN = { tx: 24, tz: 31 };
 

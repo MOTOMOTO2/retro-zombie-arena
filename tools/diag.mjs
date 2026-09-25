@@ -54,6 +54,20 @@ await page.evaluate(() => {
       g.player.award(90000);
     }
     if (opts.power) g.turnOnPower();
+    if (opts.give) for (const id of opts.give) g.player.giveWeapon(id);
+    if (opts.spawnAhead) {
+      const fx = -Math.sin(g.player.yaw);
+      const fz = -Math.cos(g.player.yaw);
+      for (let i = 0; i < opts.spawnAhead; i++) {
+        const e = g.pool.acquire(opts.kind ?? 'walker');
+        if (!e) break;
+        const side = (i % 3) - 1;
+        const dist = 7 + Math.floor(i / 3) * 5;
+        e.spawn(opts.kind ?? 'walker', g.player.x + fx * dist - fz * side * 3.2,
+          g.player.z + fz * dist + fx * side * 3.2, 800, 6, null, g.rng);
+        e.state = 'hunt';
+      }
+    }
     for (let i = 0; i < (opts.frames ?? 20); i++) g.update(1 / 120);
     g.fadeIn = 1;
     g.retro.setFade(1);
@@ -81,7 +95,9 @@ const shots = [
   ['furnace', { tile: [7, 30], yaw: -Math.PI / 2, frames: 20 }],
   ['generator', { tile: [40, 10], yaw: Math.PI / 2, frames: 20 }],
   ['catacombs', { tile: [8, 10], yaw: 0, frames: 20 }],
-  ['horde', { tile: [24, 31], yaw: Math.PI, frames: 60 * 22 }],
+  ['zombies', { reset: true, tile: [24, 31], yaw: Math.PI, spawnAhead: 6, frames: 40 }],
+  ['hounds', { reset: true, tile: [24, 31], yaw: Math.PI, spawnAhead: 4, kind: 'hound', frames: 40 }],
+  ['shotgun', { give: ['boomstick'], spawnAhead: 5, frames: 30 }],
 ];
 
 for (const [name, opts] of shots) {

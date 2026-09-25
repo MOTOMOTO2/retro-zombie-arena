@@ -49,7 +49,6 @@ import {
   POWERUPS,
   POWERUP_IDS,
   POWERUP_LIFETIME,
-  NUKE_SCORE as _NUKE,
   packedName,
   planRound,
   roundBonus,
@@ -61,8 +60,6 @@ import {
 } from './rules.ts';
 import { ViewModel } from './viewmodel.ts';
 import { BOX_POOL, boxWeights, getWeapon, shotDamage, type WeaponDef } from './weapons.ts';
-
-void _NUKE;
 
 export type GameState = 'boot' | 'menu' | 'playing' | 'paused' | 'gameover';
 
@@ -380,6 +377,7 @@ export class Game {
     this.hud.setRound(1);
     this.hud.toggleMap(false);
     this.hud.setPerks([]);
+    this.hud.setGrenades(this.player.grenades, this.player.hasGrenades);
     this.syncAmmoHud();
 
     this.setState('playing');
@@ -1266,7 +1264,6 @@ export class Game {
     const def = getWeapon('knife');
     this.camera.getWorldDirection(this.tmpDir);
     const ox = this.camera.position.x;
-    const oy = this.camera.position.y;
     const oz = this.camera.position.z;
     const best: { e: Enemy | null; d: number } = { e: null, d: Infinity };
     this.pool.forEachLive((e) => {
@@ -1293,7 +1290,6 @@ export class Game {
       this.player.award(extra);
       this.hud.setPoints(this.player.points);
     }
-    void oy;
   }
 
   private updateRound(dt: number): void {
@@ -1330,12 +1326,8 @@ export class Game {
       if (!e.active) continue;
       e.update(
         dt, this.grid, this.player.x, this.player.z, this.player.alive, this.torn,
-        (enemy, dmg) => {
-          const scaled = this.player.perks.has('juggernog') ? dmg : dmg;
-          this.hurtPlayer(scaled);
-          void enemy;
-        },
-        (enemy, b) => {
+        (_enemy, dmg) => this.hurtPlayer(dmg),
+        (_enemy, b) => {
           audio.boardBreak({ x: b.center.x, z: b.center.z });
           for (let i = 0; i < 6; i++) {
             this.particles.spawn(
@@ -1348,7 +1340,6 @@ export class Game {
             this.torn.add(this.grid.idx(b.def.tx, b.def.tz));
             this.grid.invalidateField();
           }
-          void enemy;
         },
         (enemy) => {
           if (enemy.kind === 'hound') audio.bark({ x: enemy.x, z: enemy.z });

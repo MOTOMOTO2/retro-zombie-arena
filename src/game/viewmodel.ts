@@ -13,8 +13,10 @@ import { getWeapon, type WeaponDef } from './weapons.ts';
 
 export type ViewPose = 'idle' | 'reload' | 'lower' | 'raise' | 'melee';
 
-const REST = new THREE.Vector3(0.34, -0.3, -0.62);
-const ADS = new THREE.Vector3(0, -0.175, -0.42);
+const REST = new THREE.Vector3(0.30, -0.25, -0.72);
+const ADS = new THREE.Vector3(0, -0.145, -0.5);
+/** The models are authored at roughly life size; this frames them on screen. */
+const HOLDER_SCALE = 0.52;
 
 export class ViewModel {
   readonly scene = new THREE.Scene();
@@ -41,10 +43,11 @@ export class ViewModel {
 
   constructor() {
     this.camera = new THREE.PerspectiveCamera(58, 1.6, 0.01, 12);
+    this.holder.scale.setScalar(HOLDER_SCALE);
     this.scene.add(this.holder);
-    this.scene.add(new THREE.AmbientLight(0xb9c4d0, 2.9));
+    this.scene.add(new THREE.AmbientLight(0xc8d2dc, 4.2));
 
-    const key = new THREE.DirectionalLight(0xfff0d0, 3.4);
+    const key = new THREE.DirectionalLight(0xfff0d0, 4.6);
     key.position.set(-0.6, 1, 0.6);
     this.scene.add(key);
     const rim = new THREE.DirectionalLight(0x5f7fb0, 1.9);
@@ -224,6 +227,7 @@ export class ViewModel {
 
     this.holder.position.copy(pos);
     this.holder.rotation.copy(rot);
+    this.holder.scale.setScalar(HOLDER_SCALE);
   }
 
   reset(): void {

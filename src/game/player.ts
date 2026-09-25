@@ -55,7 +55,7 @@ export class Player {
   readonly perks = new Set<PerkId>();
   slots: Slot[] = [];
   activeSlot = 0;
-  grenades = 2;
+  grenades = 0;
   hasGrenades = false;
 
   alive = true;
@@ -92,7 +92,7 @@ export class Player {
     this.perks.clear();
     this.slots = [{ id: 'sidearm', ...startingAmmo(getWeapon('sidearm')), packed: false }];
     this.activeSlot = 0;
-    this.grenades = 2;
+    this.grenades = 0;
     this.hasGrenades = false;
     this.alive = true;
     this.grounded = true;
@@ -183,7 +183,7 @@ export class Player {
       const def = getWeapon(s.id);
       s.reserve = def.reserveMax;
     }
-    this.grenades = 4;
+    if (this.hasGrenades) this.grenades = 4;
   }
 
   spend(cost: number): boolean {

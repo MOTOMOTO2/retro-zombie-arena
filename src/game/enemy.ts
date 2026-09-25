@@ -25,8 +25,6 @@ export type HitResult = {
   damageDealt: number;
 };
 
-const UP = new THREE.Vector3(0, 1, 0);
-
 export class Enemy {
   readonly model: ZombieModel;
   kind: EnemyKind = 'walker';
@@ -506,12 +504,3 @@ export function rayHitsEnemy(
   return { dist: t, head: hy >= headBand };
 }
 
-const _tmp = new THREE.Vector3();
-
-/** Screen-independent helper: world-space aim ray from a camera. */
-export function cameraRay(camera: THREE.Camera): THREE.Vector3 {
-  camera.getWorldDirection(_tmp);
-  return _tmp;
-}
-
-export { UP };

@@ -461,7 +461,7 @@ export function textures(): TextureSet {
       finish(zombieSkin(0x5e6b63, 0x3003)),
       finish(zombieSkin(0x86745e, 0x3004)),
     ],
-    houndSkin: finish(zombieSkin(0x3a2f28, 0x3005)),
+    houndSkin: finish(zombieSkin(0x584438, 0x3005)),
   };
   for (const t of [cache.blood, [cache.bullet]].flat()) {
     t.wrapS = THREE.ClampToEdgeWrapping;

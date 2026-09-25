@@ -22,6 +22,7 @@ import {
   zoneAt,
 } from '../src/world/mapdata.ts';
 import { NavGrid } from '../src/world/grid.ts';
+import { PACK_TILE } from '../src/world/props.ts';
 import { Rng } from '../src/core/rng.ts';
 import {
   BOX_POOL,
@@ -82,6 +83,7 @@ describe('arena layout', () => {
       ...PERKS.map((p) => ({ what: p.perk, tx: p.tx, tz: p.tz })),
       ...BOX_PADS.map((p) => ({ what: 'box', tx: p.tx, tz: p.tz })),
       { what: 'power', tx: POWER_SWITCH.tx, tz: POWER_SWITCH.tz },
+      { what: 'pack-a-punch', tx: PACK_TILE.tx, tz: PACK_TILE.tz },
     ];
     for (const p of props) {
       assert.equal(map[p.tz * MAP_W + p.tx], T_FLOOR, `${p.what} is inside geometry`);
@@ -128,6 +130,21 @@ describe('arena layout', () => {
     }
     for (const p of PERKS) {
       assert.ok(reach.has(p.tz * MAP_W + p.tx), `${p.perk} machine is unreachable`);
+    }
+  });
+
+  it('backs the power switch and Pack-a-Punch onto a wall', () => {
+    for (const m of [POWER_SWITCH, PACK_TILE]) {
+      const nx = Math.round(Math.sin(m.facing));
+      const nz = Math.round(Math.cos(m.facing));
+      assert.equal(map[(m.tz - nz) * MAP_W + (m.tx - nx)], T_WALL);
+    }
+  });
+
+  it('spawns every window from outside the shell', () => {
+    for (const b of BARRICADES) {
+      const outside = map[(b.tz + b.dz) * MAP_W + (b.tx + b.dx)];
+      assert.notEqual(outside, T_FLOOR, `${b.id} opens into another room`);
     }
   });
 

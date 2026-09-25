@@ -115,7 +115,7 @@ function bakeLights(): BakeLight[] {
           y: WALL_H - 1.1,
           z: (z + 0.5) * TILE,
           color: new THREE.Color(zone.lightColor),
-          intensity: rng.range(5.0, 6.2),
+          intensity: rng.range(6.2, 7.4),
           radius: 30,
         });
       }
@@ -132,7 +132,7 @@ function bakeLights(): BakeLight[] {
         y: WALL_H - 1.4,
         z: (c.z + (c.h >= c.w ? t * c.h : c.h / 2)) * TILE,
         color: new THREE.Color(CORRIDOR_LIGHT),
-        intensity: 4.0,
+        intensity: 5.2,
         radius: 22,
       });
     }
@@ -217,13 +217,13 @@ export function buildLevel(map: Uint8Array): BuiltLevel {
       const z1 = z0 + TILE;
 
       // Floor.
-      getBatch(`floor${s.floor.id}`, s.floor, s.tint, 0.86).quad(
+      getBatch(`floor${s.floor.id}`, s.floor, s.tint, 0.95).quad(
         v(x0, 0, z1), v(x1, 0, z1), v(x1, 0, z0), v(x0, 0, z0),
         v(0, 1, 0), 1, 1,
       );
 
       // Ceiling.
-      getBatch('ceil', tex.ceiling, s.tint, 0.72).quad(
+      getBatch('ceil', tex.ceiling, s.tint, 0.98).quad(
         v(x0, WALL_H, z0), v(x1, WALL_H, z0), v(x1, WALL_H, z1), v(x0, WALL_H, z1),
         v(0, -1, 0), 1, 1,
       );
@@ -245,7 +245,7 @@ export function buildLevel(map: Uint8Array): BuiltLevel {
         const nz = tz + dz;
         const nt = nx < 0 || nz < 0 || nx >= MAP_W || nz >= MAP_H ? 0 : map[nz * MAP_W + nx];
         if (isOpenTile(nt)) continue;
-        getBatch(`wall${s.wall.id}`, s.wall, s.tint, 0.9).quad(
+        getBatch(`wall${s.wall.id}`, s.wall, s.tint, 1.06).quad(
           corners[0], corners[1], corners[2], corners[3], normal, 1, wallRepeatY,
         );
       }

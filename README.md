@@ -17,12 +17,15 @@ audio files in this repository. Textures are painted onto canvases, models are
 stacks of boxes, lighting is baked into vertex colours at load, and every sound
 is synthesised with the Web Audio API.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  ST. MERCY ASYLUM  —  six rooms, seven doors, one way out:   │
-│  there isn't one.                                            │
-└──────────────────────────────────────────────────────────────┘
-```
+> **ST. MERCY ASYLUM** — six rooms, seven doors, one way out: there isn't one.
+
+| | |
+|---|---|
+| ![Title screen](docs/01-title.png) | ![Admissions, with the horde inside](docs/02-lobby.png) |
+| ![The chapel](docs/03-chapel.png) | ![The furnace hall](docs/04-furnace.png) |
+
+*(Screenshots are captured by `tools/diag.mjs` in headless Chromium with
+software WebGL, so they are exactly what the game draws.)*
 
 ## Running it
 
@@ -137,6 +140,7 @@ test/
 tools/
   mapcheck.mjs         prints the arena as ASCII and validates prop placement
   diag.mjs             screenshots the built game from fixed camera positions
+docs/                  the screenshots above
 ```
 
 ## How it is put together

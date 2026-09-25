@@ -13,13 +13,16 @@ import { RetroPipeline, type RetroQuality } from '../core/retro.ts';
 import { ParticleField, applyLight, flatMaterial } from '../gfx/models.ts';
 import { textures } from '../gfx/textures.ts';
 import { NavGrid } from '../world/grid.ts';
-import { buildLevel, fogColorAt, type BuiltLevel } from '../world/build.ts';
+import { buildLevel, lookAt, type BuiltLevel } from '../world/build.ts';
 import { dressLevel } from '../world/dressing.ts';
+import { MAPS } from '../world/maps.ts';
 import {
+  MAP_W,
   TILE,
   T_FLOOR,
   WALL_H,
   type Layout,
+  type MapId,
   type ZoneId,
   generateLayout,
   getZone,
@@ -31,7 +34,6 @@ import {
 import {
   BarricadeProp,
   DoorProp,
-  MysteryBox,
   PerkMachine,
   WallBuy,
   buildProps,
@@ -43,17 +45,15 @@ import { Enemy, EnemyPool, rayHitsEnemy } from './enemy.ts';
 import { Hud, type MinimapBlip } from './hud.ts';
 import { EYE_HEIGHT, Player } from './player.ts';
 import {
-  BOX_MOVE_MAX,
-  BOX_MOVE_MIN,
   CARPENTER_SCORE,
   MYSTERY_BOX_COST,
   NUKE_SCORE,
-  PACK_COST,
   PERK_INFO,
+  enemyHealth,
+  houndHealth,
   POWERUPS,
   POWERUP_IDS,
   POWERUP_LIFETIME,
-  packedName,
   planRound,
   roundBonus,
   scoreForHit,
@@ -63,17 +63,81 @@ import {
   type SpawnPlan,
 } from './rules.ts';
 import { ViewModel } from './viewmodel.ts';
-import { BOX_POOL, boxWeights, getWeapon, shotDamage, type WeaponDef } from './weapons.ts';
+import {
+  AMMO_MODS,
+  AMMO_MOD_IDS,
+  PAP_MAX,
+  RARITY_INFO,
+  getWeapon,
+  magFor,
+  modChance,
+  papCost,
+  papMultiplier,
+  reserveFor,
+  shotDamage,
+  tierName,
+  type AmmoMod,
+  type WeaponDef,
+} from './weapons.ts';
+import { BoxController, type BoxUnit } from './box.ts';
+import { BossEnemy, bossHealth, type BossHooks, type BossMove } from './boss.ts';
+import { BOSS_DELAY, Quest } from './quest.ts';
+import { RADIO_NAME, type BossId, type StoryBeat } from './story.ts';
+import {
+  buildQuestProps,
+  disposeQuestProps,
+  questGroups,
+  type QuestProps,
+} from '../world/questprops.ts';
+import { ElementFX, FIRE_COLORS, ICE_COLORS, SPARK_BLUE } from './elements.ts';
 
-export type GameState = 'boot' | 'menu' | 'playing' | 'paused' | 'gameover';
+/** Hex colour as a CSS string. */
+function css(hex: number): string {
+  return `#${hex.toString(16).padStart(6, '0')}`;
+}
+
+const ICE_TINT = new THREE.Color(0.7, 1.3, 2.2);
+const FIRE_TINT = new THREE.Color(2.2, 1.0, 0.3);
+
+export type GameState = 'boot' | 'menu' | 'playing' | 'paused' | 'gameover' | 'victory';
 
 export type RunStats = {
+  map: MapId;
   round: number;
   kills: number;
   headshots: number;
   points: number;
   seconds: number;
+  /** Got out alive. */
+  escaped: boolean;
 };
+
+/** Something a boss threw, in flight. */
+type BossShot = {
+  mesh: THREE.Mesh;
+  kind: 'fireball' | 'acid';
+  x: number; y: number; z: number;
+  vx: number; vy: number; vz: number;
+  life: number;
+};
+
+/** A patch of burning ground or acid that hurts to stand in. */
+type Hazard = {
+  mesh: THREE.Mesh;
+  kind: 'fireball' | 'acid';
+  x: number; z: number;
+  radius: number;
+  dps: number;
+  life: number;
+};
+
+const SHOT_GRAVITY = 26;
+const PART_SPARK = new THREE.Color(0.5, 2.4, 1.9);
+const ACID_COLOR = new THREE.Color(0.5, 1.8, 0.4);
+/** How deep each boss roars. */
+const BOSS_PITCH: Record<BossId, number> = { warden: 0.5, butcher: 0.42, furnace: 0.36, patient0: 0.62 };
+/** Points for putting a boss down, on top of the kill. */
+const BOSS_BOUNTY = 2500;
 
 type Projectile = {
   mesh: THREE.Mesh;
@@ -103,6 +167,9 @@ const DUST_COLOR = new THREE.Color(0x9a9282);
 const EMBER_COLOR = new THREE.Color(0xff8a2a);
 
 const INTERACT_RANGE = 5.2;
+/** Fog start and end indoors, and out under the open sky where you can see further. */
+const FOG_INDOOR: [number, number] = [16, 120];
+const FOG_OUTDOOR: [number, number] = [26, 175];
 
 export class Game {
   readonly scene = new THREE.Scene();
@@ -117,7 +184,26 @@ export class Game {
   private layout!: Layout;
   private level!: BuiltLevel;
   private props!: PropSet;
-  private readonly box = new MysteryBox();
+  private questProps!: QuestProps;
+  /** The goal of the current run. */
+  quest: Quest = new Quest('asylum');
+  /** Bosses are built once and kept. */
+  private readonly bosses = new Map<BossId, BossEnemy>();
+  private readonly bossHooks: BossHooks;
+  /** The boss's own light, kept in the scene at zero so adding it never recompiles a shader. */
+  private readonly bossLight = new THREE.PointLight(0xffffff, 0, 20, 2);
+  private readonly bossShots: BossShot[] = [];
+  private readonly hazards: Hazard[] = [];
+  private hazardHurt = 0;
+  /** Radio lines waiting for their moment, by run time. */
+  private readonly radioQueue: { at: number; text: string }[] = [];
+  private readonly tmpTarget = new THREE.Vector3();
+  private readonly boxes: BoxController;
+  private readonly elements = new ElementFX();
+  /** How many mystery boxes this map runs at once. */
+  private boxCount = 1;
+  /** Ammo mods cannot go off on every round. */
+  private modCooldown = 0;
   /** True while the world built at boot has not been played yet. */
   private worldFresh = false;
   private readonly pool = new EnemyPool();
@@ -139,6 +225,7 @@ export class Game {
   state: GameState = 'boot';
   onStateChange: (s: GameState) => void = () => {};
   onGameOver: (stats: RunStats) => void = () => {};
+  onVictory: (stats: RunStats) => void = () => {};
 
   private round = 0;
   private plan: SpawnPlan = planRound(1);
@@ -155,14 +242,8 @@ export class Game {
   private killsSinceDrop = 0;
   private dropsThisRound = 0;
 
-  private boxRolls = 0;
-  private boxLimit = 5;
-  private boxState: 'idle' | 'rolling' | 'offer' | 'closing' | 'moving' = 'idle';
-  private boxTimer = 0;
-  private boxOffer: string | null = null;
-  private boxBuyer = false;
-
   private repairHold = 0;
+  private legendaryFlash = 0;
   private fieldTimer = 0;
   private bobPhase = 0;
   private stepTimer = 0;
@@ -193,7 +274,15 @@ export class Game {
     // a baked vertex colour of 1.0 renders at its full texture value.
     this.scene.add(new THREE.AmbientLight(0xffffff, Math.PI));
 
-    this.scene.add(this.box.group);
+    this.boxes = new BoxController(this.scene, 2, this.rng, {
+      owned: () => this.player.slots.map((s) => s.id),
+      openZones: () => this.openZones,
+      probe: () => this.level.probe,
+      onReveal: (u, id) => this.onBoxReveal(u, id),
+      onBear: (u) => this.onBoxBear(u),
+      onMoved: () => {},
+    });
+    this.scene.add(this.elements.group);
     this.scene.add(this.pool.group);
     this.scene.add(this.particles.points);
 
@@ -201,12 +290,14 @@ export class Game {
     this.torch = new THREE.PointLight(0xffd2a0, 9, 16, 2);
     this.scene.add(this.torch);
     this.scene.add(this.muzzleLight);
+    this.scene.add(this.bossLight);
+    this.bossHooks = this.makeBossHooks();
     this.viewmodel.init(this.retro.renderer);
     this.viewmodel.onEvent = (e) => audio.mech(e);
 
     this.buildTracerPool();
     this.buildDecalPool();
-    this.buildWorld(randomSeed());
+    this.buildWorld(randomSeed(), 'asylum');
     this.worldFresh = true;
 
     this.viewmodel.equip('sidearm');
@@ -295,26 +386,39 @@ export class Game {
 
   /* --------------------------------------------------------------- world */
 
-  /** Throws away the current asylum and builds a new one from a seed. */
-  private buildWorld(seed: number): void {
+  /** Throws away the current map and builds a new one from a seed. */
+  private buildWorld(seed: number, map: MapId): void {
     if (this.level) {
       this.scene.remove(this.level.group);
       this.level.dispose();
       for (const g of propGroups(this.props)) this.scene.remove(g);
       disposeProps(this.props);
+      for (const g of questGroups(this.questProps)) this.scene.remove(g);
+      disposeQuestProps(this.questProps);
     }
-    this.layout = generateLayout(seed);
+    const profile = MAPS[map];
+    this.layout = generateLayout(seed, profile);
+    this.boxCount = profile.boxes;
     this.grid = new NavGrid(this.layout.tiles);
     this.level = buildLevel(this.layout, dressLevel(this.layout));
     this.scene.add(this.level.group);
     this.props = buildProps(this.layout, this.level.probe);
     for (const g of propGroups(this.props)) this.scene.add(g);
-    this.box.moveTo(this.layout.boxPads[0], 0, this.level.probe);
-    const spawnZone = getZone(this.layout, this.layout.spawnZone);
-    this.fog.color.copy(fogColorAt(this.layout, spawnZone.id));
+    this.questProps = buildQuestProps(this.layout.parts, this.layout.workbench, this.layout.exit, this.level.probe);
+    for (const g of questGroups(this.questProps)) this.scene.add(g);
+    this.boxes.reset(this.layout.boxPads, this.boxCount);
+    const look = lookAt(this.layout, this.layout.spawnZone);
+    this.fog.color.set(look.fog);
+    this.fog.near = look.outdoor ? FOG_OUTDOOR[0] : FOG_INDOOR[0];
+    this.fog.far = look.outdoor ? FOG_OUTDOOR[1] : FOG_INDOOR[1];
   }
 
-  /** The seed of the asylum currently loaded. */
+  /** Which map is loaded. */
+  get mapId(): MapId {
+    return this.layout.map;
+  }
+
+  /** The seed of the map currently loaded. */
   get seed(): number {
     return this.layout.seed;
   }
@@ -357,11 +461,11 @@ export class Game {
   /* --------------------------------------------------------------- start */
 
   /**
-   * Starts a run. Every run gets a freshly generated asylum; pass a seed to
-   * replay a particular one.
+   * Starts a run on a map. Every run gets a freshly generated layout; pass a
+   * seed to replay a particular one.
    */
-  newRun(seed?: number): void {
-    if (seed !== undefined || !this.worldFresh) this.buildWorld(seed ?? randomSeed());
+  newRun(seed?: number, map: MapId = this.layout.map): void {
+    if (seed !== undefined || !this.worldFresh || map !== this.layout.map) this.buildWorld(seed ?? randomSeed(), map);
     this.worldFresh = false;
 
     const spawn = tileCenter(this.layout.spawn.tx, this.layout.spawn.tz);
@@ -370,22 +474,26 @@ export class Game {
     this.player.pitch = 0;
 
     this.pool.reset();
+    this.clearBossEffects();
+    this.quest = new Quest(this.layout.map);
+    this.syncQuestProps();
+    this.radioQueue.length = 0;
+    this.hud.clearRadio();
+    this.hud.setBoss(null);
     this.torn.clear();
     this.openZones.clear();
     this.openZone(this.layout.spawnZone);
     this.activePowerups.clear();
+    for (const p of this.projectiles) this.scene.remove(p.mesh);
+    for (const d of this.drops) this.scene.remove(d.group);
     this.projectiles.length = 0;
     this.drops.length = 0;
     this.killsSinceDrop = 0;
     this.dropsThisRound = 0;
     this.runSeconds = 0;
-    this.boxRolls = 0;
-    this.boxLimit = this.rng.int(BOX_MOVE_MAX - BOX_MOVE_MIN + 1) + BOX_MOVE_MIN;
-    this.boxState = 'idle';
-    this.boxOffer = null;
-    this.box.setLid(0);
-    this.box.showWeapon(null);
-    this.box.moveTo(this.layout.boxPads[0], 0, this.level.probe);
+    this.boxes.reset(this.layout.boxPads, this.boxCount);
+    this.elements.reset();
+    this.modCooldown = 0;
     this.props.pack.showWeapon(null);
     this.props.pack.setPowered(false);
     this.props.power.setOn(false);
@@ -402,8 +510,6 @@ export class Game {
       while (b.addBoard());
     }
     for (const m of this.decals) m.visible = false;
-    for (const p of this.projectiles) this.scene.remove(p.mesh);
-    for (const d of this.drops) this.scene.remove(d.group);
 
     this.viewmodel.reset();
     this.equipCurrent();
@@ -426,8 +532,10 @@ export class Game {
 
     this.setState('playing');
     audio.startMusic();
-    this.hud.banner('ST. MERCY ASYLUM', 2.6, '#e8e2ce');
-    this.hud.toast(`${getZone(this.layout, this.layout.spawnZone).name}  ·  LAYOUT #${this.layout.seed}`, '#bdb6a0', 3.2);
+    const chapter = this.quest.chapter;
+    this.hud.banner(this.layout.mapName, 2.6, '#e8e2ce');
+    this.hud.toast(`CHAPTER ${chapter.number}: ${chapter.title}  ·  LAYOUT #${this.layout.seed}`, '#bdb6a0', 3.2);
+    this.sayLater('start', 3.2);
   }
 
   pause(): void {
@@ -449,6 +557,8 @@ export class Game {
 
   get stats(): RunStats {
     return {
+      map: this.layout.map,
+      escaped: this.quest.escaped,
       round: Math.max(1, this.round),
       kills: this.player.kills,
       headshots: this.player.headshots,
@@ -497,8 +607,9 @@ export class Game {
       if (!this.openZones.has(b.def.zone)) continue;
       const d = Math.hypot(b.center.x - this.player.x, b.center.z - this.player.z);
       candidates.push(b);
-      // Near windows are far likelier, but distant ones never drop to zero.
-      weights.push(1 / (1 + d * 0.05) + 0.08);
+      // Near windows are far likelier. Distant ones never drop to zero, but
+      // on a big map the far side of it barely gets a look in.
+      weights.push(d < 110 ? 1 / (1 + d * 0.05) + 0.06 : 0.012);
     }
     if (!candidates.length) return null;
     return candidates[this.rng.weighted(weights)];
@@ -511,7 +622,9 @@ export class Game {
 
   private trySpawn(): void {
     if (this.spawned >= this.plan.total) return;
-    if (this.pool.liveCount >= this.plan.maxAlive) return;
+    // A boss fight thins the horde out so the fight is about the boss.
+    const cap = this.bossAlive ? Math.ceil(this.plan.maxAlive * 0.4) + 1 : this.plan.maxAlive;
+    if (this.pool.liveCount >= cap) return;
     const barricade = this.pickSpawnBarricade();
     if (!barricade) return;
     const kind = this.pickKind();
@@ -580,7 +693,7 @@ export class Game {
 
   /** Puts the weapon in the active slot into the player's hands. */
   private equipCurrent(): void {
-    this.viewmodel.equip(this.player.slot.id, this.player.slot.packed);
+    this.viewmodel.equip(this.player.slot.id, this.player.slot.tier);
   }
 
   /* ---------------------------------------------------------------- combat */
@@ -596,14 +709,15 @@ export class Game {
     if (outcome.kind !== 'shoot') return;
 
     const def = outcome.def;
-    const packed = this.player.slot.packed;
+    const tier = this.player.slot.tier;
     // Firing out of a shell-by-shell reload abandons it.
     if (def.shellReload) this.viewmodel.cancelShells();
     this.viewmodel.kick(def.kick * (this.input.aim ? 0.6 : 1));
     this.muzzleLightTimer = 0.06;
     this.muzzleLight.color.setHex(def.tracer || 0xffc070);
     this.shake = Math.min(3.2, this.shake + def.shake * 0.35);
-    audio.shot(def, { x: this.player.x, z: this.player.z });
+    if (def.kind === 'flame') audio.flameTick();
+    else audio.shot(def, { x: this.player.x, z: this.player.z });
     this.syncAmmoHud();
 
     const origin = this.tmpV.set(this.camera.position.x, this.camera.position.y, this.camera.position.z).clone();
@@ -611,11 +725,23 @@ export class Game {
     const base = this.tmpDir.clone();
 
     if (def.kind === 'rocket' || def.kind === 'plasma') {
-      this.spawnProjectile(def, origin, base, packed);
+      this.spawnProjectile(def, origin, base, tier);
       return;
     }
     if (def.kind === 'cone') {
-      this.coneBlast(origin, base, def, packed);
+      this.coneBlast(origin, base, def, tier);
+      return;
+    }
+    if (def.kind === 'chain') {
+      this.stormBolt(origin, base, def, tier);
+      return;
+    }
+    if (def.kind === 'frost') {
+      this.frostCone(origin, base, def, tier);
+      return;
+    }
+    if (def.kind === 'flame') {
+      this.flameStream(origin, base, def, tier);
       return;
     }
 
@@ -628,12 +754,12 @@ export class Game {
         dir.z += this.rng.range(-spread, spread);
         dir.normalize();
       }
-      this.hitscan(origin, dir, def, packed, i === 0);
+      this.hitscan(origin, dir, def, tier, i === 0);
     }
   }
 
   private hitscan(
-    origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, packed: boolean, tracer: boolean,
+    origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, tier: number, tracer: boolean,
   ): void {
     const wall = this.grid.raycast(origin.x, origin.z, dir.x, dir.z, def.range, this.torn);
     // Convert the 2D wall distance into a 3D limit, and clip on floor/ceiling.
@@ -664,10 +790,12 @@ export class Game {
       const dmg = shotDamage(def, {
         head: best.head,
         doubleTap: this.player.perks.has('doubletap'),
-        instaKill: this.activePowerups.has('instakill'),
-        packed,
+        // Insta-kill does not one-shot a boss.
+        instaKill: this.activePowerups.has('instakill') && !struck.isBoss,
+        tier,
       });
       this.damageEnemy(struck, dmg, best.head, false, hitPoint);
+      this.maybeTriggerMod(struck, hitPoint);
       return;
     }
 
@@ -686,7 +814,7 @@ export class Game {
   }
 
   /** Thunderclap: everything inside a wide forward cone is thrown and gibbed. */
-  private coneBlast(origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, packed: boolean): void {
+  private coneBlast(origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, tier: number): void {
     const hits: Enemy[] = [];
     this.pool.forEachLive((e) => {
       const dx = e.x - origin.x;
@@ -700,15 +828,194 @@ export class Game {
     });
     for (const e of hits) {
       this.damageEnemy(
-        e, shotDamage(def, { head: false, doubleTap: false, instaKill: false, packed }),
+        e, shotDamage(def, { head: false, doubleTap: false, instaKill: false, tier }) * (e.isBoss ? 0.15 : 1),
         false, true, new THREE.Vector3(e.x, e.headY, e.z),
       );
     }
     this.shake = 4;
   }
 
+  /* ------------------------------------------------------------- elements */
+
+  /** Stormcaller: a bolt to the first body in the sights, then on through the crowd. */
+  private stormBolt(origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, tier: number): void {
+    const muzzle = this.viewmodel.muzzleWorld(this.camera, new THREE.Vector3());
+    const wall = this.grid.raycast(origin.x, origin.z, dir.x, dir.z, def.range, this.torn);
+    const limit = wall.hit ? wall.dist / Math.max(0.0001, Math.hypot(dir.x, dir.z)) : def.range;
+    // Lightning is forgiving: take the body closest to the aim line.
+    let first: Enemy | null = null;
+    let bestScore = Infinity;
+    this.pool.forEachLive((e) => {
+      const dx = e.x - origin.x;
+      const dz = e.z - origin.z;
+      const along = dx * dir.x + dz * dir.z;
+      if (along <= 0 || along > limit) return;
+      const off = Math.hypot(dx - dir.x * along, dz - dir.z * along);
+      if (off > 2.2 + along * 0.05) return;
+      if (!this.grid.lineOfSight(origin.x, origin.z, e.x, e.z)) return;
+      const score = off * 3 + along * 0.1;
+      if (score < bestScore) {
+        bestScore = score;
+        first = e;
+      }
+    });
+    const target = first as Enemy | null;
+    if (!target) {
+      const end = new THREE.Vector3().copy(dir).multiplyScalar(Math.min(limit, 30)).add(origin);
+      this.elements.bolt(muzzle, end, def.tracer);
+      audio.zap();
+      return;
+    }
+    const dmg = shotDamage(def, { head: false, doubleTap: false, instaKill: false, tier });
+    this.chainLightning(target, muzzle, dmg, def.splashDamage + tier * 2, def.splashRadius, def.tracer);
+  }
+
+  /** Lightning into one body, then jumping on to the nearest others that can see it. */
+  private chainLightning(first: Enemy, from: THREE.Vector3, damage: number, jumps: number, radius: number, color: number): void {
+    const hit = new Set<Enemy>();
+    let cur: Enemy | null = first;
+    const prev = from.clone();
+    for (let i = 0; i < jumps && cur; i++) {
+      const e: Enemy = cur;
+      hit.add(e);
+      const at = new THREE.Vector3(e.x, e.y + e.model.height * 0.6, e.z);
+      this.elements.bolt(prev, at, color);
+      for (let k = 0; k < 6; k++) {
+        this.particles.spawn(at.x, at.y, at.z, this.rng.range(-5, 5), this.rng.range(1, 7), this.rng.range(-5, 5),
+          SPARK_BLUE, this.rng.range(0.15, 0.4), 16);
+      }
+      e.shocked = Math.max(e.shocked, e.isBoss ? 0.12 : 0.7);
+      this.damageEnemy(e, e.isBoss ? damage * 0.2 : damage, false, false, at, { x: prev.x, z: prev.z });
+      let next: Enemy | null = null;
+      let bestD = radius;
+      this.pool.forEachLive((o) => {
+        if (hit.has(o)) return;
+        const d = Math.hypot(o.x - e.x, o.z - e.z);
+        if (d < bestD && this.grid.lineOfSight(e.x, e.z, o.x, o.z)) {
+          bestD = d;
+          next = o;
+        }
+      });
+      prev.copy(at);
+      cur = next;
+    }
+    audio.zap({ x: first.x, z: first.z });
+  }
+
+  /** Winter's Howl: a cone of frost that freezes everything it touches. */
+  private frostCone(origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, tier: number): void {
+    const muzzle = this.viewmodel.muzzleWorld(this.camera, new THREE.Vector3());
+    for (let i = 0; i < 26; i++) {
+      const s = this.rng.range(16, 26);
+      const c = ICE_COLORS[i % ICE_COLORS.length];
+      this.particles.spawn(muzzle.x, muzzle.y, muzzle.z,
+        dir.x * s + this.rng.range(-4, 4), dir.y * s + this.rng.range(-2.5, 2.5), dir.z * s + this.rng.range(-4, 4),
+        c, this.rng.range(0.35, 0.75), 2);
+    }
+    const dmg = shotDamage(def, { head: false, doubleTap: false, instaKill: false, tier });
+    const hits: Enemy[] = [];
+    this.pool.forEachLive((e) => {
+      const dx = e.x - origin.x;
+      const dz = e.z - origin.z;
+      const d = Math.hypot(dx, dz);
+      if (d > def.range || d < 0.001) return;
+      if ((dx / d) * dir.x + (dz / d) * dir.z < 0.8) return;
+      if (!this.grid.lineOfSight(origin.x, origin.z, e.x, e.z)) return;
+      hits.push(e);
+    });
+    for (const e of hits) this.freeze(e, 3.5 + tier * 0.5, dmg);
+    audio.freeze({ x: this.player.x, z: this.player.z });
+  }
+
+  private freeze(e: Enemy, seconds: number, damage: number): void {
+    const at = new THREE.Vector3(e.x, e.y + e.model.height * 0.5, e.z);
+    this.damageEnemy(e, damage, false, false, at);
+    if (e.state === 'dead') return;
+    e.frozen = Math.max(e.frozen, e.isBoss ? 0.5 : seconds);
+    e.burning = 0;
+    for (let k = 0; k < 6; k++) {
+      this.particles.spawn(at.x, at.y, at.z, this.rng.range(-3, 3), this.rng.range(0, 4), this.rng.range(-3, 3),
+        ICE_COLORS[k % ICE_COLORS.length], this.rng.range(0.3, 0.7), 10);
+    }
+  }
+
+  /** Dragonfire: one tick of the flame stream, stopped by the first wall. */
+  private flameStream(origin: THREE.Vector3, dir: THREE.Vector3, def: WeaponDef, tier: number): void {
+    const muzzle = this.viewmodel.muzzleWorld(this.camera, new THREE.Vector3());
+    const wall = this.grid.raycast(origin.x, origin.z, dir.x, dir.z, def.range, this.torn);
+    const reach = wall.hit ? Math.min(def.range, wall.dist / Math.max(0.0001, Math.hypot(dir.x, dir.z))) : def.range;
+    for (let i = 0; i < 8; i++) {
+      const s = this.rng.range(15, 22);
+      this.particles.spawn(muzzle.x, muzzle.y, muzzle.z,
+        dir.x * s + this.rng.range(-2.2, 2.2), dir.y * s + this.rng.range(-1, 2.2), dir.z * s + this.rng.range(-2.2, 2.2),
+        FIRE_COLORS[i % FIRE_COLORS.length], (reach / s) * this.rng.range(0.6, 1), -4);
+    }
+    const dmg = shotDamage(def, { head: false, doubleTap: false, instaKill: false, tier });
+    this.pool.forEachLive((e) => {
+      const dx = e.x - origin.x;
+      const dz = e.z - origin.z;
+      const d = Math.hypot(dx, dz);
+      if (d > reach + e.radius || d < 0.001) return;
+      if ((dx / d) * dir.x + (dz / d) * dir.z < 0.86) return;
+      if (!this.grid.lineOfSight(origin.x, origin.z, e.x, e.z)) return;
+      this.damageEnemy(e, dmg * (e.fireproof ? 0.25 : 1), false, false, new THREE.Vector3(e.x, e.y + 2, e.z), this.player, { quiet: true });
+      this.ignite(e, 4 + tier);
+    });
+  }
+
+  private ignite(e: Enemy, seconds: number): void {
+    if (e.state === 'dead' || e.fireproof) return;
+    e.frozen = 0;
+    e.burning = Math.max(e.burning, e.isBoss ? seconds * 0.5 : seconds);
+    e.burnDps = Math.max(e.burnDps, 40 + e.maxHealth * (e.isBoss ? 0.004 : 0.09));
+  }
+
+  /** Tier II and III guns: sometimes a landed round sets off the gun's ammo mod. */
+  private maybeTriggerMod(e: Enemy, at: THREE.Vector3): void {
+    const slot = this.player.slot;
+    if (!slot.mod || slot.tier < 2 || this.modCooldown > 0) return;
+    const { chance, cooldown } = modChance(slot.tier);
+    if (!this.rng.chance(chance)) return;
+    this.modCooldown = cooldown;
+    this.triggerMod(slot.mod, e, at, slot.tier);
+  }
+
+  private triggerMod(mod: AmmoMod, e: Enemy, at: THREE.Vector3, tier: number): void {
+    const color = AMMO_MODS[mod].color;
+    if (mod === 'deadwire') {
+      const pct = e.isBoss ? 0.02 : tier >= 3 ? 0.45 : 0.3;
+      this.chainLightning(e, at, 400 + e.maxHealth * pct, tier >= 3 ? 6 : 4, 9, color);
+      return;
+    }
+    const radius = mod === 'blastfurnace' ? 6.5 : 5.5;
+    const near: Enemy[] = [];
+    this.pool.forEachLive((o) => {
+      if (Math.hypot(o.x - e.x, o.z - e.z) <= radius) near.push(o);
+    });
+    if (e.state !== 'dead' && !near.includes(e)) near.push(e);
+    if (mod === 'blastfurnace') {
+      for (let k = 0; k < 30; k++) {
+        const a = this.rng.range(0, Math.PI * 2);
+        const s = this.rng.range(3, 9);
+        this.particles.spawn(at.x, at.y, at.z, Math.cos(a) * s, this.rng.range(1, 6), Math.sin(a) * s,
+          FIRE_COLORS[k % FIRE_COLORS.length], this.rng.range(0.3, 0.8), -3);
+      }
+      for (const o of near) this.ignite(o, 4 + tier);
+      audio.fireBurst({ x: at.x, z: at.z });
+    } else {
+      for (let k = 0; k < 30; k++) {
+        const a = this.rng.range(0, Math.PI * 2);
+        const s = this.rng.range(2, 7);
+        this.particles.spawn(at.x, at.y, at.z, Math.cos(a) * s, this.rng.range(0, 4), Math.sin(a) * s,
+          ICE_COLORS[k % ICE_COLORS.length], this.rng.range(0.3, 0.8), 8);
+      }
+      for (const o of near) this.freeze(o, 3 + tier * 0.5, 0);
+      audio.freeze({ x: at.x, z: at.z });
+    }
+  }
+
   private spawnProjectile(
-    def: WeaponDef, origin: THREE.Vector3, dir: THREE.Vector3, packed: boolean,
+    def: WeaponDef, origin: THREE.Vector3, dir: THREE.Vector3, tier: number,
   ): void {
     const isPlasma = def.kind === 'plasma';
     const mat = new THREE.MeshBasicMaterial({ color: isPlasma ? 0x6effd8 : 0xffa24d });
@@ -720,7 +1027,7 @@ export class Game {
     this.scene.add(mesh);
 
     const speed = isPlasma ? 78 : 52;
-    const mult = packed ? 2.4 : 1;
+    const mult = papMultiplier(tier);
     this.projectiles.push({
       mesh,
       vx: dir.x * speed, vy: dir.y * speed, vz: dir.z * speed,
@@ -804,7 +1111,10 @@ export class Game {
   private damageEnemy(
     e: Enemy, amount: number, head: boolean, explosive: boolean, at: THREE.Vector3,
     from: { x: number; z: number } = this.player,
+    opts: { quiet?: boolean } = {},
   ): void {
+    // Frozen bodies are brittle.
+    if (e.frozen > 0) amount *= 1.5;
     let dirX = e.x - from.x;
     let dirZ = e.z - from.z;
     const len = Math.hypot(dirX, dirZ) || 1;
@@ -814,7 +1124,18 @@ export class Game {
     if (res.damageDealt <= 0) return;
 
     const doublePoints = this.activePowerups.has('doublepoints');
-    const gore = res.killed ? (res.gibbed ? 26 : 14) : head ? 9 : 5;
+    if (res.shattered) {
+      // Frozen solid, it bursts into ice.
+      for (let i = 0; i < 34; i++) {
+        this.particles.spawn(e.x, e.y + this.rng.range(0.4, 3), e.z,
+          this.rng.range(-7, 7), this.rng.range(1, 9), this.rng.range(-7, 7),
+          ICE_COLORS[i % ICE_COLORS.length], this.rng.range(0.4, 1.1), 26);
+      }
+      audio.freeze({ x: e.x, z: e.z });
+    }
+    // Damage over time and flame ticks stay quiet: no spray, no hit points.
+    if (opts.quiet && !res.killed) return;
+    const gore = res.killed ? (res.gibbed && !res.shattered ? 26 : 14) : head ? 9 : 5;
     // Blood sprays out the far side, the way the round was travelling.
     for (let i = 0; i < gore; i++) {
       const out = this.rng.range(1, 8);
@@ -857,7 +1178,8 @@ export class Game {
     this.hud.pointsDelta(award);
     this.hud.hitmarker(true);
     this.hud.setPoints(this.player.points);
-    this.maybeDropPowerUp(e.x, e.z);
+    if (e.isBoss) this.onBossKilled(e);
+    else this.maybeDropPowerUp(e.x, e.z);
   }
 
   private hurtPlayer(amount: number): void {
@@ -978,6 +1300,534 @@ export class Game {
     }
   }
 
+  /* ---------------------------------------------------------- the story */
+
+  /** Radio chatter, banners and sounds for whatever just happened in the story. */
+  private beats(list: StoryBeat[]): void {
+    const c = this.quest.chapter;
+    for (const beat of list) {
+      switch (beat) {
+        case 'power':
+          this.say('power', 0, 2.6);
+          break;
+        case 'part':
+          audio.pickup();
+          this.hud.toast(`PART FOUND  ${this.quest.partsFound}/${this.quest.parts.length}`, '#7affd0', 2);
+          this.say('part', this.quest.partsFound - 1);
+          break;
+        case 'parts':
+          audio.pickup();
+          audio.objective();
+          this.hud.toast('ALL PARTS FOUND', '#7affd0', 2.4);
+          this.say('parts');
+          break;
+        case 'built':
+          audio.objective();
+          this.hud.banner(`${c.device} BUILT`, 2.6, '#7affd0');
+          this.retro.setTint(0x7affd0, 0.35);
+          this.say('built');
+          break;
+        case 'boss':
+          audio.bossRoar(undefined, BOSS_PITCH[c.boss]);
+          this.hud.banner(c.bossName, 3.2, '#d22f26');
+          this.shake = Math.max(this.shake, 3);
+          this.say('boss', 0, 1.2);
+          break;
+        case 'bossDown':
+          audio.objective();
+          this.hud.banner(`${c.bossName} IS DEAD`, 3.2, '#ffc84d');
+          this.hud.toast('THE WAY OUT IS OPEN', '#7bd14a', 3);
+          this.say('bossDown', 0, 1.6);
+          break;
+        case 'start':
+        case 'escaped':
+          break;
+      }
+    }
+    this.syncQuestProps();
+  }
+
+  /** Voss says his line for a beat, now or after a delay. */
+  private say(beat: StoryBeat, n = 0, delay = 0): void {
+    const text = this.quest.radioLine(beat, n);
+    if (!text) return;
+    if (delay > 0) {
+      this.radioQueue.push({ at: this.runSeconds + delay, text });
+      return;
+    }
+    this.hud.radio(RADIO_NAME, text);
+    audio.radio();
+  }
+
+  private sayLater(beat: StoryBeat, delay: number): void {
+    this.say(beat, 0, delay);
+  }
+
+  private syncQuestProps(): void {
+    const q = this.quest;
+    const qp = this.questProps;
+    qp.parts.forEach((p, i) => p.setTaken(q.parts[i]));
+    qp.bench.setBuilt(q.built);
+    qp.bench.setParts(q.parts);
+    qp.bench.setReady(q.canBuild);
+    qp.exit.setOpen(q.boss === 'dead');
+  }
+
+  private takePart(i: number): void {
+    const part = this.questProps.parts[i];
+    const beats = this.quest.takePart(i);
+    if (!beats.length) return;
+    for (let k = 0; k < 18; k++) {
+      this.particles.spawn(part.center.x, part.center.y + 0.6, part.center.z,
+        this.rng.range(-3, 3), this.rng.range(1, 6), this.rng.range(-3, 3),
+        PART_SPARK, this.rng.range(0.3, 0.8), 6);
+    }
+    this.beats(beats);
+  }
+
+  private buildDevice(): void {
+    if (!this.quest.canBuild) {
+      audio.deny();
+      return;
+    }
+    const at = this.questProps.bench.center;
+    for (let k = 0; k < 30; k++) {
+      this.particles.spawn(at.x, at.y + 0.6, at.z,
+        this.rng.range(-4, 4), this.rng.range(2, 8), this.rng.range(-4, 4),
+        k % 2 ? SPARK_COLOR : PART_SPARK, this.rng.range(0.3, 0.9), 20);
+    }
+    audio.buy();
+    this.shake = Math.max(this.shake, 1.2);
+    this.beats(this.quest.build());
+  }
+
+  private tryEscape(): void {
+    if (!this.quest.canEscape) {
+      audio.deny();
+      const hint = this.quest.built ? 'NOT WHILE IT IS STILL OUT THERE' : 'SEALED. FINISH THE JOB FIRST';
+      this.hud.toast(hint, '#d22f26', 1.6);
+      return;
+    }
+    this.quest.escape();
+    audio.stopMusic();
+    audio.victory();
+    this.hud.clearRadio();
+    this.hud.setWaypoint(null);
+    this.hud.setBoss(null);
+    this.hud.setPrompt(null);
+    this.retro.setTint(0xffffff, 0.5);
+    this.setState('victory');
+    this.input.exitLock();
+    this.onVictory(this.stats);
+  }
+
+  get bossAlive(): boolean {
+    const b = this.pool.boss;
+    return Boolean(b && b.active && b.state !== 'dead');
+  }
+
+  private updateQuest(dt: number): void {
+    while (this.radioQueue.length && this.radioQueue[0].at <= this.runSeconds) {
+      const line = this.radioQueue.shift();
+      if (line) {
+        this.hud.radio(RADIO_NAME, line.text);
+        audio.radio();
+      }
+    }
+    // Something is coming: a distant roar halfway through the wait.
+    const before = this.quest.bossTimer;
+    if (this.quest.tick(dt)) this.spawnBoss();
+    if (this.quest.boss === 'coming' && before > BOSS_DELAY / 2 && this.quest.bossTimer <= BOSS_DELAY / 2) {
+      audio.bossRoar(undefined, BOSS_PITCH[this.quest.chapter.boss] * 0.9);
+      this.shake = Math.max(this.shake, 1.2);
+    }
+
+    const boss = this.pool.boss;
+    if (boss instanceof BossEnemy && boss.active && boss.state !== 'dead') {
+      if (boss.spec.light) {
+        boss.lightPosition(this.bossLight.position);
+        this.bossLight.color.setHex(boss.spec.light);
+        this.bossLight.intensity = 34 + Math.sin(this.elapsed * 13) * 6 + (boss.enraged ? 14 : 0);
+      }
+      if (boss.id === 'furnace' && this.rng.chance(dt * 40)) {
+        this.particles.spawn(boss.x + this.rng.range(-1, 1), boss.y + this.rng.range(1, boss.model.height), boss.z + this.rng.range(-1, 1),
+          this.rng.range(-0.5, 0.5), this.rng.range(2, 4), this.rng.range(-0.5, 0.5),
+          FIRE_COLORS[this.rng.int(3)], this.rng.range(0.4, 0.8), -3);
+      }
+    } else {
+      this.bossLight.intensity = 0;
+    }
+    // Once the body has sunk away, the boss leaves play.
+    if (boss && !boss.active) this.pool.removeBoss();
+  }
+
+  private spawnBoss(): void {
+    const id = this.quest.chapter.boss;
+    let boss = this.bosses.get(id);
+    if (!boss) {
+      boss = new BossEnemy(id);
+      this.bosses.set(id, boss);
+    }
+    const win = this.pickBossWindow();
+    let x: number;
+    let z: number;
+    if (win) {
+      x = win.center.x + win.def.dx * TILE * 2;
+      z = win.center.z + win.def.dz * TILE * 2;
+    } else {
+      const spot = this.farFloor();
+      if (!spot) return;
+      x = spot.x;
+      z = spot.z;
+    }
+    this.pool.addBoss(boss);
+    boss.begin(x, z, bossHealth(id, Math.max(1, this.round)), win, this.rng, this.bossHooks);
+    this.beats(this.quest.bossArrived());
+  }
+
+  /** A window in the open part of the map, a fair way off. */
+  private pickBossWindow(): BarricadeProp | null {
+    let best: BarricadeProp | null = null;
+    let bestScore = Infinity;
+    for (const b of this.props.barricades) {
+      if (!this.openZones.has(b.def.zone)) continue;
+      const d = Math.hypot(b.center.x - this.player.x, b.center.z - this.player.z);
+      const score = Math.abs(d - 30) + (d < 14 ? 100 : 0);
+      if (score < bestScore) {
+        bestScore = score;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  /** The middle of the open room farthest from the player. */
+  private farFloor(): { x: number; z: number } | null {
+    let best: { x: number; z: number } | null = null;
+    let bestD = -1;
+    for (const zone of this.layout.zones) {
+      if (!this.openZones.has(zone.id)) continue;
+      const tx = zone.rect.x + Math.floor(zone.rect.w / 2);
+      const tz = zone.rect.z + Math.floor(zone.rect.h / 2);
+      if (this.grid.tiles[tz * MAP_W + tx] !== T_FLOOR) continue;
+      const c = tileCenter(tx, tz);
+      const d = Math.hypot(c.x - this.player.x, c.z - this.player.z);
+      if (d > bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  private onBossKilled(e: Enemy): void {
+    const bounty = BOSS_BOUNTY * (this.activePowerups.has('doublepoints') ? 2 : 1);
+    this.player.award(bounty);
+    this.hud.pointsDelta(bounty);
+    this.hud.setPoints(this.player.points);
+    this.spawnDrop('maxammo', e.x, e.z);
+    for (let i = 0; i < 60; i++) {
+      this.particles.spawn(e.x, e.y + this.rng.range(1, e.model.height), e.z,
+        this.rng.range(-9, 9), this.rng.range(2, 14), this.rng.range(-9, 9),
+        BLOOD_COLOR, this.rng.range(0.4, 1.2), 26);
+    }
+    audio.bossRoar({ x: e.x, z: e.z }, BOSS_PITCH[this.quest.chapter.boss] * 0.7);
+    this.shake = Math.max(this.shake, 4);
+    this.retro.setTint(0xffffff, 0.35);
+    this.bossLight.intensity = 0;
+    this.beats(this.quest.bossKilled());
+  }
+
+  /** Shoves the player away from a point. */
+  private knockPlayer(fromX: number, fromZ: number, strength: number): void {
+    const p = this.player;
+    let dx = p.x - fromX;
+    let dz = p.z - fromZ;
+    const d = Math.hypot(dx, dz) || 1;
+    dx /= d;
+    dz /= d;
+    p.pushX += dx * strength;
+    p.pushZ += dz * strength;
+    if (p.grounded) {
+      p.vy = 4.5;
+      p.grounded = false;
+    }
+  }
+
+  private makeBossHooks(): BossHooks {
+    return {
+      slam: (b, radius, damage) => {
+        audio.slam({ x: b.x, z: b.z });
+        this.shake = Math.max(this.shake, 3.6);
+        for (let i = 0; i < 44; i++) {
+          const a = (i / 44) * Math.PI * 2;
+          const s = this.rng.range(9, 17);
+          this.particles.spawn(b.x + Math.cos(a) * 1.2, 0.4, b.z + Math.sin(a) * 1.2,
+            Math.cos(a) * s, this.rng.range(1, 4), Math.sin(a) * s,
+            DUST_COLOR, this.rng.range(0.3, 0.7), 18);
+        }
+        this.placeDecal(b.x, 0.05, b.z, 0, 0, false, radius * 0.45);
+        const d = Math.hypot(this.player.x - b.x, this.player.z - b.z);
+        // A jump clears the shockwave.
+        if (d < radius && this.player.y < 0.8 && this.player.alive) {
+          const k = 1 - d / radius;
+          this.hurtPlayer(Math.round(damage * (0.45 + 0.55 * k)));
+          this.knockPlayer(b.x, b.z, 8 + 14 * k);
+        }
+      },
+      lob: (_b, kind, x, y, z, toX, toZ) => this.lobShot(kind, x, y, z, toX, toZ),
+      summon: (b, kind, count) => {
+        const health = kind === 'hound' ? houndHealth(Math.max(1, this.round)) : enemyHealth(Math.max(1, this.round));
+        for (let i = 0; i < count; i++) {
+          const e = this.pool.acquire(kind);
+          if (!e) break;
+          let x = b.x;
+          let z = b.z;
+          for (let tries = 0; tries < 10; tries++) {
+            const a = this.rng.range(0, Math.PI * 2);
+            const r = this.rng.range(3, 7);
+            const cx = b.x + Math.cos(a) * r;
+            const cz = b.z + Math.sin(a) * r;
+            if (this.grid.lineOfSight(b.x, b.z, cx, cz)) {
+              x = cx;
+              z = cz;
+              break;
+            }
+          }
+          e.spawn(kind, x, z, health, Math.max(1, this.round), null, this.rng);
+          for (let k = 0; k < 14; k++) {
+            this.particles.spawn(x, 0.5, z, this.rng.range(-3, 3), this.rng.range(2, 7), this.rng.range(-3, 3),
+              kind === 'hound' ? EMBER_COLOR : ACID_COLOR, this.rng.range(0.3, 0.7), 12);
+          }
+        }
+        this.hud.toast(kind === 'hound' ? 'HE CALLED HIS DOGS' : 'THEY ANSWER HIM', '#ff6a2a', 2);
+      },
+      roar: (b) => {
+        audio.bossRoar({ x: b.x, z: b.z }, BOSS_PITCH[b.id]);
+        this.shake = Math.max(this.shake, 2.4);
+        this.retro.setTint(0xff3020, 0.22);
+      },
+      telegraph: (b, move: BossMove) => {
+        const at = { x: b.x, z: b.z };
+        if (move === 'charge') audio.bossRoar(at, BOSS_PITCH[b.id] * 1.3);
+        else audio.zombieVoice(at, move === 'leap' ? 'scream' : move === 'throw' ? 'snarl' : 'growl', 0.5);
+      },
+      strike: (b, damage, knock) => {
+        this.hurtPlayer(damage);
+        this.knockPlayer(b.x, b.z, knock);
+        audio.slam({ x: b.x, z: b.z });
+        this.shake = Math.max(this.shake, 3.2);
+      },
+      crash: (b) => {
+        audio.slam({ x: b.x, z: b.z });
+        this.shake = Math.max(this.shake, 2.6);
+        for (let i = 0; i < 24; i++) {
+          this.particles.spawn(b.x, this.rng.range(1, 4), b.z, this.rng.range(-6, 6), this.rng.range(1, 6), this.rng.range(-6, 6),
+            DUST_COLOR, this.rng.range(0.3, 0.8), 20);
+        }
+        this.hud.toast('STUNNED — HIT IT NOW', '#ffc84d', 1.4);
+      },
+    };
+  }
+
+  private readonly shotGeo = new THREE.OctahedronGeometry(0.55, 0);
+  private readonly shotMats = {
+    fireball: new THREE.MeshBasicMaterial({ color: new THREE.Color(5, 1.8, 0.3) }),
+    acid: new THREE.MeshBasicMaterial({ color: new THREE.Color(0.6, 3.2, 0.9) }),
+  };
+  private readonly hazardGeo = new THREE.CircleGeometry(1, 14);
+
+  /** Throws a shot in an arc that lands on a point. */
+  private lobShot(kind: 'fireball' | 'acid', x: number, y: number, z: number, toX: number, toZ: number): void {
+    const dx = toX - x;
+    const dz = toZ - z;
+    const d = Math.hypot(dx, dz) || 1;
+    const t = THREE.MathUtils.clamp(d / 22, 0.55, 1.7);
+    const mesh = new THREE.Mesh(this.shotGeo, this.shotMats[kind]);
+    mesh.position.set(x, y, z);
+    if (kind === 'acid') mesh.scale.setScalar(0.8);
+    this.scene.add(mesh);
+    this.bossShots.push({
+      mesh, kind, x, y, z,
+      vx: dx / t, vz: dz / t, vy: (0.3 - y) / t + 0.5 * SHOT_GRAVITY * t,
+      life: 4,
+    });
+    if (kind === 'fireball') audio.fireBurst({ x, z });
+    else audio.zombieVoice({ x, z }, 'snarl', 0.7);
+  }
+
+  private updateBossShots(dt: number): void {
+    const p = this.player;
+    for (let i = this.bossShots.length - 1; i >= 0; i--) {
+      const s = this.bossShots[i];
+      s.vy -= SHOT_GRAVITY * dt;
+      const nx = s.x + s.vx * dt;
+      const ny = s.y + s.vy * dt;
+      const nz = s.z + s.vz * dt;
+      s.life -= dt;
+      let hit = s.life <= 0;
+      let hx = nx;
+      let hz = nz;
+      const step = Math.hypot(nx - s.x, nz - s.z);
+      if (step > 1e-3) {
+        const w = this.grid.raycast(s.x, s.z, (nx - s.x) / step, (nz - s.z) / step, step, this.torn);
+        if (w.hit) {
+          hit = true;
+          hx = w.x;
+          hz = w.z;
+        }
+      }
+      if (ny <= 0.3) hit = true;
+      if (Math.hypot(nx - p.x, nz - p.z) < 1.4 && ny > p.y && ny < p.y + 4) hit = true;
+      s.x = nx;
+      s.y = ny;
+      s.z = nz;
+      s.mesh.position.set(nx, ny, nz);
+      s.mesh.rotation.x += dt * 7;
+      s.mesh.rotation.y += dt * 5;
+      const trail = s.kind === 'fireball' ? FIRE_COLORS[this.rng.int(3)] : ACID_COLOR;
+      this.particles.spawn(nx, ny, nz, this.rng.range(-1, 1), this.rng.range(0, 2), this.rng.range(-1, 1), trail, this.rng.range(0.2, 0.45), -2);
+      if (hit) {
+        this.burstShot(s, hx, Math.max(0.3, Math.min(ny, WALL_H - 0.5)), hz);
+        this.scene.remove(s.mesh);
+        this.bossShots.splice(i, 1);
+      }
+    }
+  }
+
+  private burstShot(s: BossShot, x: number, y: number, z: number): void {
+    const fire = s.kind === 'fireball';
+    for (let k = 0; k < 26; k++) {
+      const a = this.rng.range(0, Math.PI * 2);
+      const v = this.rng.range(2, 8);
+      this.particles.spawn(x, y, z, Math.cos(a) * v, this.rng.range(1, 7), Math.sin(a) * v,
+        fire ? FIRE_COLORS[k % 3] : ACID_COLOR, this.rng.range(0.3, 0.8), fire ? -2 : 14);
+    }
+    if (fire) audio.fireBurst({ x, z });
+    else audio.flesh({ x, z }, true);
+    const d = Math.hypot(this.player.x - x, this.player.z - z);
+    if (d < 4.2 && this.player.y < y + 3) this.hurtPlayer(Math.round(30 * (1 - (d / 4.2) * 0.6)));
+    // Whatever lands leaves the ground burning or bubbling for a while.
+    const radius = fire ? 3.4 : 3.0;
+    const mat = new THREE.MeshBasicMaterial({
+      color: fire ? new THREE.Color(2.6, 0.9, 0.15) : new THREE.Color(0.4, 2.0, 0.5),
+      transparent: true, opacity: 0.75, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(this.hazardGeo, mat);
+    mesh.scale.set(radius, radius, 1);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(x, 0.07, z);
+    this.scene.add(mesh);
+    this.hazards.push({ mesh, kind: s.kind, x, z, radius, dps: fire ? 24 : 18, life: fire ? 4.5 : 6 });
+  }
+
+  private updateHazards(dt: number): void {
+    const p = this.player;
+    for (let i = this.hazards.length - 1; i >= 0; i--) {
+      const h = this.hazards[i];
+      h.life -= dt;
+      const mat = h.mesh.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.min(0.75, h.life * 0.6) * (0.85 + 0.15 * Math.sin(this.elapsed * 12 + i));
+      if (this.rng.chance(dt * 16)) {
+        const a = this.rng.range(0, Math.PI * 2);
+        const r = this.rng.range(0, h.radius);
+        this.particles.spawn(h.x + Math.cos(a) * r, 0.2, h.z + Math.sin(a) * r, 0, this.rng.range(1, 3), 0,
+          h.kind === 'fireball' ? FIRE_COLORS[this.rng.int(3)] : ACID_COLOR, this.rng.range(0.3, 0.7), -2);
+      }
+      if (p.alive && p.y < 0.6 && Math.hypot(p.x - h.x, p.z - h.z) < h.radius) this.hazardHurt += h.dps * dt;
+      if (h.life <= 0) {
+        this.scene.remove(h.mesh);
+        mat.dispose();
+        this.hazards.splice(i, 1);
+      }
+    }
+    if (this.hazardHurt >= 7) {
+      this.hurtPlayer(Math.round(this.hazardHurt));
+      this.hazardHurt = 0;
+    }
+  }
+
+  private clearBossEffects(): void {
+    for (const s of this.bossShots) this.scene.remove(s.mesh);
+    this.bossShots.length = 0;
+    for (const h of this.hazards) {
+      this.scene.remove(h.mesh);
+      (h.mesh.material as THREE.Material).dispose();
+    }
+    this.hazards.length = 0;
+    this.hazardHurt = 0;
+    this.bossLight.intensity = 0;
+  }
+
+  /** Where the objective marker points: the next thing the story needs. */
+  private objectiveTarget(): THREE.Vector3 | null {
+    const q = this.quest;
+    switch (q.stage) {
+      case 'power':
+        return this.tmpTarget.copy(this.props.power.center);
+      case 'parts': {
+        let best: THREE.Vector3 | null = null;
+        let bestD = Infinity;
+        for (const part of this.questProps.parts) {
+          if (part.taken) continue;
+          const d = Math.hypot(part.center.x - this.player.x, part.center.z - this.player.z);
+          if (d < bestD) {
+            bestD = d;
+            best = part.center;
+          }
+        }
+        return best ? this.tmpTarget.copy(best) : null;
+      }
+      case 'build':
+        return this.tmpTarget.copy(this.questProps.bench.center);
+      case 'boss': {
+        const b = this.pool.boss;
+        if (!b || !b.active || b.state === 'dead' || b.state === 'approach') return null;
+        return this.tmpTarget.set(b.x, b.headY + 1.2, b.z);
+      }
+      case 'escape':
+        return this.tmpTarget.copy(this.questProps.exit.center);
+      default:
+        return null;
+    }
+  }
+
+  /** Puts the objective marker on screen, or pins it to the edge pointing the way. */
+  private updateWaypoint(): void {
+    const t = this.objectiveTarget();
+    if (!t || !this.player.alive || this.state !== 'playing') {
+      this.hud.setWaypoint(null);
+      return;
+    }
+    const dist = Math.hypot(t.x - this.player.x, t.z - this.player.z);
+    if (dist < 4.5) {
+      this.hud.setWaypoint(null);
+      return;
+    }
+    this.camera.updateMatrixWorld();
+    const v = this.tmpV.copy(t).applyMatrix4(this.camera.matrixWorldInverse);
+    const behind = v.z > -0.5;
+    let sx: number;
+    let sy: number;
+    if (behind) {
+      // Behind the camera: slide it round to the edge on the side it is on.
+      sx = v.x;
+      sy = -Math.abs(v.y) - Math.abs(v.z) * 0.3;
+    } else {
+      v.applyMatrix4(this.camera.projectionMatrix);
+      sx = v.x;
+      sy = v.y;
+    }
+    // Off screen it rides an ellipse inside the edges, clear of the HUD corners.
+    const k = Math.hypot(sx / 0.86, sy / 0.72);
+    const edge = behind || k > 1;
+    if (edge) {
+      sx /= Math.max(k, 1e-6);
+      sy /= Math.max(k, 1e-6);
+    }
+    this.hud.setWaypoint((sx * 0.5 + 0.5) * window.innerWidth, (-sy * 0.5 + 0.5) * window.innerHeight, dist / 2, edge);
+  }
+
   /* --------------------------------------------------------- interaction */
 
   private findInteractable(): {
@@ -1049,24 +1899,47 @@ export class Game {
     }
 
     if (this.props.pack.powered) {
+      const tier = p.slot.tier;
+      const maxed = tier >= PAP_MAX;
       consider(
         this.props.pack.center.x, this.props.pack.center.z,
-        p.slot.packed ? 'ALREADY PACKED' : `PACK-A-PUNCH ${p.weapon.name}`,
-        p.slot.packed ? 0 : PACK_COST,
+        maxed ? `${tierName(p.weapon.name, tier)} IS MAXED OUT` : `PACK-A-PUNCH TO TIER ${['I', 'II', 'III'][tier]}`,
+        maxed ? 0 : papCost(tier),
         () => this.packWeapon(), 5.5,
       );
     }
 
-    const box = this.box;
-    if (this.boxState === 'offer' && this.boxBuyer && this.boxOffer) {
+    for (const u of this.boxes.units) {
+      if (!u.enabled) continue;
+      const c = u.prop.center;
+      if (u.state === 'offer' && u.buyer && u.offer) {
+        const def = getWeapon(u.offer);
+        consider(c.x, c.z, `TAKE ${def.name} · ${RARITY_INFO[def.rarity].name}`, 0, () => this.takeBoxWeapon(u), 5.5);
+      } else if (u.state === 'idle') {
+        consider(c.x, c.z, 'MYSTERY BOX', MYSTERY_BOX_COST, () => this.rollBox(u), 5.5);
+      }
+    }
+
+    const q = this.quest;
+    const qp = this.questProps;
+    for (const part of qp.parts) {
+      if (part.taken) continue;
+      consider(part.center.x, part.center.z, `PICK UP THE ${q.chapter.parts[part.index]}`, 0, () => this.takePart(part.index), 5);
+    }
+    if (!q.built) {
+      const missing = q.parts.length - q.partsFound;
+      const label = q.canBuild
+        ? `BUILD THE ${q.chapter.device}`
+        : missing > 0
+          ? `WORKBENCH — ${missing} PART${missing > 1 ? 'S' : ''} MISSING`
+          : `WORKBENCH — NEEDS POWER`;
+      consider(qp.bench.center.x, qp.bench.center.z, label, 0, () => this.buildDevice(), 5.5);
+    }
+    if (!q.escaped) {
       consider(
-        box.center.x, box.center.z,
-        `TAKE ${getWeapon(this.boxOffer).name}`, 0, () => this.takeBoxWeapon(), 5.5,
-      );
-    } else if (this.boxState === 'idle') {
-      consider(
-        box.center.x, box.center.z,
-        'MYSTERY BOX', MYSTERY_BOX_COST, () => this.rollBox(), 5.5,
+        qp.exit.center.x, qp.exit.center.z,
+        q.canEscape ? `ESCAPE THROUGH ${q.chapter.exit}` : `${q.chapter.exit} — SEALED`, 0,
+        () => this.tryEscape(), 5.5,
       );
     }
 
@@ -1179,59 +2052,86 @@ export class Game {
     audio.buy();
     this.hud.banner('POWER RESTORED', 2.4, '#7affd0');
     this.retro.setTint(0x7affd0, 0.4);
+    this.beats(this.quest.powerOn());
   }
 
+  /**
+   * Pack-a-Punch, one tier at a time: more damage, a bigger magazine and a new
+   * camo each time, and at tier II an elemental ammo mod.
+   */
   private packWeapon(): void {
     const slot = this.player.slot;
-    if (slot.packed) {
+    if (slot.tier >= PAP_MAX) {
       audio.deny();
       return;
     }
-    if (!this.player.spend(PACK_COST)) {
+    const cost = papCost(slot.tier);
+    if (!this.player.spend(cost)) {
       audio.deny();
       return;
     }
     const def = getWeapon(slot.id);
-    slot.packed = true;
-    slot.mag = def.magSize;
-    slot.reserve = def.reserveMax;
+    slot.tier++;
+    let note = '';
+    if (slot.tier >= 2 && !slot.mod) {
+      slot.mod = AMMO_MOD_IDS[this.rng.int(AMMO_MOD_IDS.length)];
+      note = `  +  ${AMMO_MODS[slot.mod].name}`;
+    }
+    slot.mag = magFor(def, slot.tier);
+    slot.reserve = reserveFor(def, slot.tier);
     this.equipCurrent();
     this.viewmodel.setPose('raise', 0.4);
     this.props.pack.showWeapon(slot.id);
     window.setTimeout(() => this.props.pack.showWeapon(null), 1800);
     audio.perkJingle();
     this.syncAmmoHud();
-    this.finishPurchase(PACK_COST, packedName(def.name), false);
+    this.finishPurchase(cost, tierName(def.name, slot.tier) + note, false);
   }
 
-  private rollBox(): void {
+  private rollBox(u: BoxUnit): void {
+    if (u.state !== 'idle') return;
     if (!this.player.spend(MYSTERY_BOX_COST)) {
       audio.deny();
       return;
     }
-    this.boxState = 'rolling';
-    this.boxTimer = 3.4;
-    this.boxBuyer = true;
-    this.boxRolls++;
-    audio.boxJingle();
-    this.box.setLid(1);
+    this.boxes.roll(u);
+    audio.musicBox();
     this.hud.setPoints(this.player.points);
     this.hud.pointsDelta(-MYSTERY_BOX_COST);
   }
 
-  private takeBoxWeapon(): void {
-    if (!this.boxOffer) return;
-    const id = this.boxOffer;
+  private takeBoxWeapon(u: BoxUnit): void {
+    const id = this.boxes.take(u);
+    if (!id) return;
     this.player.giveWeapon(id);
     this.equipCurrent();
     this.viewmodel.setPose('raise', 0.32);
     this.syncAmmoHud();
     audio.buy();
-    this.hud.toast(getWeapon(id).name, '#ffc84d', 2);
-    this.boxOffer = null;
-    this.boxState = 'closing';
-    this.boxTimer = 0.5;
-    this.box.showWeapon(null);
+    const def = getWeapon(id);
+    this.hud.toast(def.name, css(RARITY_INFO[def.rarity].color), 2);
+  }
+
+  /** The box has settled on a gun: sound and show how rare it is. */
+  private onBoxReveal(u: BoxUnit, id: string): void {
+    const def = getWeapon(id);
+    const info = RARITY_INFO[def.rarity];
+    audio.reveal(def.rarity);
+    if (!u.buyer) return;
+    this.hud.toast(`${info.name}  ·  ${def.name}`, css(info.color), 2.8);
+    if (def.rarity === 'legendary') {
+      this.hud.banner('LEGENDARY', 2.4, css(info.color));
+      this.legendaryFlash = 1;
+    }
+  }
+
+  /** A teddy bear: points back, and the box is off somewhere else. */
+  private onBoxBear(_u: BoxUnit): void {
+    this.player.award(MYSTERY_BOX_COST);
+    this.hud.setPoints(this.player.points);
+    this.hud.pointsDelta(MYSTERY_BOX_COST);
+    audio.teddy();
+    this.hud.toast('THE BOX IS MOVING  ·  POINTS REFUNDED', '#ff6a4a', 2.8);
   }
 
   private finishPurchase(cost: number, label: string, jingle = true): void {
@@ -1244,9 +2144,8 @@ export class Game {
   private syncAmmoHud(): void {
     const s = this.player.slot;
     const def = getWeapon(s.id);
-    this.hud.setWeapon(
-      s.packed ? packedName(def.name) : def.name, s.mag, s.reserve, def.magSize,
-    );
+    const mod = s.mod ? { name: AMMO_MODS[s.mod].name, color: css(AMMO_MODS[s.mod].color) } : null;
+    this.hud.setWeapon(tierName(def.name, s.tier), s.mag, s.reserve, magFor(def, s.tier), mod);
   }
 
   /* ---------------------------------------------------------------- frame */
@@ -1266,6 +2165,9 @@ export class Game {
     this.updatePlayer(dt);
     this.updateRound(dt);
     this.updateEnemies(dt);
+    this.updateQuest(dt);
+    this.updateBossShots(dt);
+    this.updateHazards(dt);
     this.updateProjectiles(dt);
     this.updateDrops(dt);
     this.updateBox(dt);
@@ -1273,6 +2175,7 @@ export class Game {
     this.updateEffects(dt);
     this.updateCamera(dt);
     this.updateHud(dt);
+    this.updateWaypoint();
     this.input.endFrame();
   }
 
@@ -1366,7 +2269,7 @@ export class Game {
     });
     const target = best.e;
     if (!target) return;
-    const dmg = this.activePowerups.has('instakill') ? 1e6 : def.damage;
+    const dmg = this.activePowerups.has('instakill') && !target.isBoss ? 1e6 : def.damage;
     const killedBefore = target.health;
     this.damageEnemy(target, dmg, false, false, new THREE.Vector3(target.x, target.headY, target.z));
     if (killedBefore <= dmg) {
@@ -1413,7 +2316,13 @@ export class Game {
       e.update(
         dt, this.grid, this.player.x, this.player.z, this.player.alive, this.torn,
         (enemy, dmg) => {
-          this.hurtPlayer(dmg);
+          // A boss's swing hurts less than a brute's but throws you across the room.
+          this.hurtPlayer(enemy.isBoss ? 45 : dmg);
+          if (enemy.isBoss) {
+            this.knockPlayer(enemy.x, enemy.z, 14);
+            audio.slam({ x: enemy.x, z: enemy.z });
+            this.shake = Math.max(this.shake, 2.2);
+          }
           if (enemy.kind === 'hound') audio.bark({ x: enemy.x, z: enemy.z });
           else if (this.rng.chance(0.7)) audio.zombieVoice({ x: enemy.x, z: enemy.z }, 'snarl', this.voicePitch(enemy));
         },
@@ -1448,10 +2357,23 @@ export class Game {
       this.spawned = Math.max(0, this.spawned - 1);
     }
 
+    for (const e of this.pool.all) {
+      if (!e.active || e.state === 'dead' || e.burning <= 0) continue;
+      this.damageEnemy(e, e.burnDps * dt, false, false, new THREE.Vector3(e.x, e.y + 2, e.z), e, { quiet: true });
+      if (this.rng.chance(dt * 22)) {
+        this.particles.spawn(e.x + this.rng.range(-0.5, 0.5), e.y + this.rng.range(0.5, e.model.height), e.z + this.rng.range(-0.5, 0.5),
+          this.rng.range(-0.6, 0.6), this.rng.range(1.5, 3.5), this.rng.range(-0.6, 0.6),
+          FIRE_COLORS[this.rng.int(3)], this.rng.range(0.3, 0.6), -2);
+      }
+    }
+
     const probe = this.level.probe;
     for (const e of this.pool.all) {
       if (!e.active) continue;
       probe.sample(e.x, e.z, this.tmpLight);
+      if (e.frozen > 0) this.tmpLight.lerp(ICE_TINT, 0.7);
+      if (e.burning > 0) this.tmpLight.lerp(FIRE_TINT, 0.35 + 0.15 * Math.sin(this.elapsed * 30 + e.x));
+      if (e.shocked > 0) this.tmpLight.addScalar(Math.random() * 1.5);
       // Freshly shot bodies flash, which reads as a hit even at a distance.
       if (e.hitFlash > 0) this.tmpLight.addScalar(e.hitFlash * 1.6);
       applyLight(e.model, this.tmpLight);
@@ -1578,68 +2500,7 @@ export class Game {
   }
 
   private updateBox(dt: number): void {
-    const box = this.box;
-    box.animate(this.elapsed, this.elapsed * 6);
-
-    if (this.boxState === 'rolling') {
-      this.boxTimer -= dt;
-      // Cycle visible weapons quickly, slowing toward the reveal.
-      const tick = Math.max(0.06, 0.34 - this.boxTimer * 0.08);
-      if (Math.floor(this.boxTimer / tick) !== Math.floor((this.boxTimer + dt) / tick)) {
-        box.showWeapon(BOX_POOL[this.rng.int(BOX_POOL.length)]);
-      }
-      if (this.boxTimer <= 0) {
-        this.boxOffer = BOX_POOL[this.rng.weighted(boxWeights())];
-        box.showWeapon(this.boxOffer);
-        this.boxState = 'offer';
-        this.boxTimer = 9;
-        audio.buy();
-      }
-      return;
-    }
-
-    if (this.boxState === 'offer') {
-      this.boxTimer -= dt;
-      if (this.boxTimer <= 0) {
-        this.boxOffer = null;
-        box.showWeapon(null);
-        this.boxState = 'closing';
-        this.boxTimer = 0.5;
-      }
-      return;
-    }
-
-    if (this.boxState === 'closing') {
-      this.boxTimer -= dt;
-      box.setLid(Math.max(0, this.boxTimer / 0.5));
-      if (this.boxTimer <= 0) {
-        box.setLid(0);
-        this.boxBuyer = false;
-        if (this.boxRolls >= this.boxLimit) {
-          this.boxState = 'moving';
-          this.boxTimer = 1.4;
-          this.hud.toast('THE BOX HAS MOVED', '#ffc84d', 2.4);
-        } else {
-          this.boxState = 'idle';
-        }
-      }
-      return;
-    }
-
-    if (this.boxState === 'moving') {
-      this.boxTimer -= dt;
-      if (this.boxTimer <= 0) {
-        const pads = this.layout.boxPads;
-        const open = pads.map((p, i) => ({ p, i })).filter(
-          (e) => this.openZones.has(e.p.zone) && e.i !== box.padIndex,
-        );
-        const pick = open.length ? open[this.rng.int(open.length)] : { p: pads[0], i: 0 };
-        box.moveTo(pick.p, pick.i, this.level.probe);
-        this.boxRolls = 0;
-        this.boxLimit = this.rng.int(BOX_MOVE_MAX - BOX_MOVE_MIN + 1) + BOX_MOVE_MIN;
-        this.boxState = 'idle';
-      }
-    }
+    this.boxes.update(dt, this.elapsed);
   }
 
   private updateProps(dt: number): void {
@@ -1648,10 +2509,16 @@ export class Game {
     for (const m of this.props.machines) m.animate(this.elapsed);
     for (const w of this.props.wallBuys) w.animate(this.elapsed);
     this.props.pack.animate(this.elapsed);
+    for (const part of this.questProps.parts) part.animate(this.elapsed);
+    this.questProps.bench.animate(this.elapsed);
+    this.questProps.exit.animate(this.elapsed, dt);
   }
 
   private updateEffects(dt: number): void {
     this.particles.update(dt);
+    this.elements.update(dt);
+    this.modCooldown = Math.max(0, this.modCooldown - dt);
+    if (this.legendaryFlash > 0) this.legendaryFlash = Math.max(0, this.legendaryFlash - dt * 1.2);
 
     for (let i = 0; i < this.tracers.length; i++) {
       if (this.tracerLife[i] <= 0) continue;
@@ -1673,7 +2540,8 @@ export class Game {
     // Decay whatever tint the last event applied.
     const instaKill = this.activePowerups.has('instakill');
     const doublePoints = this.activePowerups.has('doublepoints');
-    if (instaKill) this.retro.setTint(0xff4040, 0.16);
+    if (this.legendaryFlash > 0) this.retro.setTint(0xffc23a, this.legendaryFlash * 0.3);
+    else if (instaKill) this.retro.setTint(0xff4040, 0.16);
     else if (doublePoints) this.retro.setTint(0x40b0ff, 0.12);
     else this.retro.setTint(0x000000, 0);
   }
@@ -1706,10 +2574,16 @@ export class Game {
     this.torch.position.copy(this.camera.position);
     this.torch.intensity = 9 + Math.sin(this.elapsed * 9) * 0.5;
 
-    // Fog colour eases toward whichever room the player is standing in.
+    // Fog eases toward whichever room the player is standing in, and opens
+    // right out under the sky.
     const { tx, tz } = worldToTile(p.x, p.z);
-    this.fogTarget.copy(fogColorAt(this.layout, zoneAt(this.layout, tx, tz)));
+    const here = lookAt(this.layout, zoneAt(this.layout, tx, tz));
+    this.fogTarget.set(here.fog);
     this.fog.color.lerp(this.fogTarget, Math.min(1, dt * 1.6));
+    const [near, far] = here.outdoor ? FOG_OUTDOOR : FOG_INDOOR;
+    const k = Math.min(1, dt * 1.2);
+    this.fog.near += (near - this.fog.near) * k;
+    this.fog.far += (far - this.fog.far) * k;
     (this.scene.background as THREE.Color).copy(this.fog.color);
 
     audio.setListener({ x: p.x, z: p.z }, p.yaw);
@@ -1751,13 +2625,24 @@ export class Game {
       })),
     );
     this.syncAmmoHud();
+    this.hud.setObjectives(this.quest.objectives());
+    const boss = this.pool.boss;
+    if (boss && boss.active && boss.state !== 'dead' && boss instanceof BossEnemy) {
+      this.hud.setBoss(this.quest.chapter.bossName, boss.healthFraction, boss.enraged);
+    } else {
+      this.hud.setBoss(null);
+    }
 
     if (this.hud.mapVisible) {
       const blips: MinimapBlip[] = [];
+      const target = this.objectiveTarget();
+      if (target) blips.push({ x: target.x, z: target.z, color: '#7affd0', size: 2.2 });
       this.pool.forEachLive((e) =>
         blips.push({ x: e.x, z: e.z, color: e.kind === 'hound' ? '#ff6a2a' : '#d22f26' }),
       );
-      blips.push({ x: this.box.center.x, z: this.box.center.z, color: '#ffc84d' });
+      for (const u of this.boxes.units) {
+        if (u.enabled && u.state !== 'away' && u.state !== 'leaving') blips.push({ x: u.prop.center.x, z: u.prop.center.z, color: '#7ac8ff', size: 1.5 });
+      }
       for (const m of this.props.machines) {
         if (!m.powered) continue;
         blips.push({

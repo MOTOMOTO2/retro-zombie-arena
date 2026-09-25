@@ -14,10 +14,12 @@
  */
 
 import { Rng } from '../core/rng.ts';
+import { MAPS } from './maps.ts';
 
 export const TILE = 4; // world units per tile
-export const MAP_W = 56;
-export const MAP_H = 52;
+/** The largest map; smaller ones use the top-left of the grid. */
+export const MAP_W = 96;
+export const MAP_H = 96;
 export const WALL_H = 9;
 
 export const T_VOID = 0;
@@ -26,21 +28,60 @@ export const T_WALL = 2;
 export const T_DOOR = 3;
 export const T_BARRICADE = 4;
 
-/** Tiles of empty space kept around the whole asylum, so outer windows have room outside. */
+/** Tiles of empty space kept around the whole map, so outer windows have room outside. */
 const MARGIN = 4;
 
 export type Rect = { x: number; z: number; w: number; h: number };
 
 export type ThemeId =
-  | 'admissions'
-  | 'ward'
-  | 'records'
-  | 'furnace'
-  | 'chapel'
-  | 'armory'
-  | 'catacombs'
-  | 'morgue'
-  | 'generator';
+  // St. Mercy Asylum
+  | 'admissions' | 'ward' | 'records' | 'furnace' | 'chapel' | 'armory' | 'catacombs' | 'morgue' | 'generator'
+  // Hollow Creek
+  | 'street' | 'square' | 'house' | 'store' | 'garage' | 'cemetery'
+  // Vireo Ironworks
+  | 'loading' | 'foundry' | 'warehouse' | 'yard'
+  // Vireo Labs
+  | 'lab' | 'containment' | 'servers' | 'cryo' | 'reactor';
+
+/** What the passages between rooms look like on each map. */
+export type CorridorLook = 'corridor' | 'alley' | 'service' | 'labhall';
+
+export type MapId = 'asylum' | 'town' | 'foundry' | 'labs';
+
+/**
+ * How a map is generated: its footprint, how the room grid is laid out, how
+ * big and how open the rooms are, and which kinds of room it is built from.
+ */
+export type MapProfile = {
+  id: MapId;
+  name: string;
+  /** Tiles used, at most MAP_W x MAP_H. */
+  size: [number, number];
+  /** Candidate room-grid shapes, columns by rows. */
+  shapes: [number, number][];
+  /** Cells knocked out of the grid, min and max. */
+  drops: [number, number];
+  /** Room side length in tiles, min and max. */
+  room: [number, number];
+  /** Pairs of neighbouring cells merged into one great hall, min and max. */
+  merges: [number, number];
+  /** Passage width in tiles, min and max. */
+  corridorWidth: [number, number];
+  /** Chance a passage (not out of the start room) is an open archway with no door. */
+  archwayChance: number;
+  /** Chance each spare link becomes an extra passage, making loops. */
+  loopChance: number;
+  startThemes: ThemeId[];
+  powerTheme: ThemeId;
+  themes: ThemeId[];
+  corridorLook: CorridorLook;
+  /** Room names that differ on this map, by theme. */
+  names?: Partial<Record<ThemeId, string[]>>;
+  /** Windows per room, min and max. */
+  windows: [number, number];
+  /** Mystery boxes running at once. */
+  boxes: number;
+};
 
 export type ZoneId = string;
 
@@ -87,6 +128,9 @@ export type PerkDef = WallProp & { perk: string };
 
 export type Layout = {
   seed: number;
+  map: MapId;
+  mapName: string;
+  corridorLook: CorridorLook;
   zones: ZoneDef[];
   corridors: Rect[];
   doors: DoorDef[];
@@ -95,10 +139,16 @@ export type Layout = {
   barricades: BarricadeDef[];
   wallBuys: WallBuyDef[];
   perks: PerkDef[];
-  /** The mystery box hops between these; index 0 is where it starts. */
+  /** The mystery boxes hop between these; index 0 is where the first one starts. */
   boxPads: WallProp[];
   powerSwitch: WallProp;
   pack: WallProp;
+  /** Where the three quest parts are found, in three different rooms. */
+  parts: WallProp[];
+  /** Where the parts are built into whatever the chapter needs. */
+  workbench: WallProp;
+  /** The way out once the boss is dead. */
+  exit: WallProp;
   spawn: { tx: number; tz: number; yaw: number };
   spawnZone: ZoneId;
   powerZone: ZoneId;
@@ -112,29 +162,45 @@ export type Layout = {
 
 const THEME_NAMES: Record<ThemeId, string[]> = {
   admissions: ['ADMISSIONS', 'RECEPTION', 'FRONT HALL'],
-  ward: ['EAST WARD', 'WEST WARD', 'ISOLATION WARD', 'NIGHT WARD'],
-  records: ['RECORDS', 'ARCHIVE', "DIRECTOR'S OFFICE"],
+  ward: ['EAST WARD', 'WEST WARD', 'ISOLATION WARD', 'NIGHT WARD', 'MEDICAL WING'],
+  records: ['RECORDS', 'ARCHIVE', "DIRECTOR'S OFFICE", 'FOREMAN\'S OFFICE'],
   furnace: ['FURNACE HALL', 'BOILER ROOM', 'ASH PIT'],
   chapel: ['CHAPEL', 'SANCTUARY', 'VESTRY'],
   armory: ['ARMORY', 'SECURITY WING', 'GUARD POST'],
   catacombs: ['CATACOMBS', 'OSSUARY', 'CRYPT'],
   morgue: ['MORGUE', 'AUTOPSY', 'COLD STORAGE'],
   generator: ['GENERATOR ROOM', 'POWER STATION', 'DYNAMO HALL'],
+  street: ['MAIN STREET', 'ELM STREET', 'MILL ROAD', 'CHURCH LANE', 'MARKET ROW', 'HIGH STREET'],
+  square: ['TOWN SQUARE', 'MEMORIAL GREEN', 'THE COMMONS'],
+  house: ['THE MORROW HOUSE', 'BOARDING HOUSE', "SHERIFF'S HOUSE", "DOCTOR'S HOUSE", 'THE PARSONAGE'],
+  store: ['GENERAL STORE', 'PHARMACY', 'HARDWARE STORE', 'DINER'],
+  garage: ['GARAGE', 'GAS STATION', 'BUS DEPOT'],
+  cemetery: ['CEMETERY', "POTTER'S FIELD", 'OLD GRAVEYARD'],
+  loading: ['LOADING DOCK', 'RAIL SIDING', 'SHIPPING BAY'],
+  foundry: ['FOUNDRY FLOOR', 'CASTING HALL', 'THE MELT', 'POUR SHOP'],
+  warehouse: ['WAREHOUSE', 'STOREHOUSE', 'PARTS DEPOT'],
+  yard: ['SCRAP YARD', 'COAL YARD', 'CONTAINER YARD'],
+  lab: ['LABORATORY', 'GENETICS LAB', 'CHEM LAB', 'LAB 9-A', 'LAB 9-B'],
+  containment: ['CONTAINMENT', 'SPECIMEN VAULT', 'ISOLATION CELLS'],
+  servers: ['SERVER ROOM', 'DATA CENTRE', 'MAINFRAME'],
+  cryo: ['CRYO STORAGE', 'COLD SLEEP', 'CRYOGENICS'],
+  reactor: ['REACTOR CORE', 'REACTOR ROOM'],
 };
 
-/** Rooms the run can begin in: somewhere that looks like a way in. */
-const START_THEMES: ThemeId[] = ['admissions', 'ward', 'records'];
-const OTHER_THEMES: ThemeId[] = [
-  'furnace', 'chapel', 'armory', 'catacombs', 'morgue', 'ward', 'records', 'admissions',
-];
-/** Themes that suit freestanding columns. */
-const PILLAR_THEMES = new Set<ThemeId>(['chapel', 'catacombs', 'generator', 'morgue', 'ward', 'furnace']);
+/** Themes that suit freestanding columns, and those whose big halls get rows of them. */
+const PILLAR_THEMES = new Set<ThemeId>([
+  'chapel', 'catacombs', 'generator', 'morgue', 'ward', 'furnace',
+  'foundry', 'warehouse', 'loading', 'servers', 'reactor', 'cryo', 'square',
+]);
+const HALL_THEMES = new Set<ThemeId>(['foundry', 'warehouse', 'loading', 'generator', 'servers', 'reactor']);
 
 /** The starting room always sells these two. */
 const START_GUNS = ['boomstick'];
 const START_SECOND = ['trench', 'grease'];
-/** Spread over the rest of the asylum, one per room while they last. */
+/** Spread over the rest of the map, one per room while they last. */
 const OTHER_GUNS = ['nailrifle', 'longshot', 'scattergun', 'frag'];
+/** Big maps get extra copies of the everyday guns in far rooms. */
+const FILLER_GUNS = ['boomstick', 'trench', 'grease', 'nailrifle', 'scattergun'];
 const OTHER_PERKS = ['juggernog', 'speedcola', 'doubletap', 'staminup'];
 
 /* ------------------------------------------------------------- helpers */
@@ -228,7 +294,7 @@ export function floodFloor(map: Uint8Array, startTx: number, startTz: number): S
 /* ----------------------------------------------------------- generation */
 
 type Cell = { col: number; row: number; x0: number; z0: number; x1: number; z1: number };
-type Edge = { a: number; b: number; horizontal: boolean };
+type Edge = { a: number; b: number; horizontal: boolean; fromCell?: number; toCell?: number };
 
 /** Picks a span [lo, lo+len) that covers [coreLo, coreHi) and stays inside [min, max). */
 function span(
@@ -315,25 +381,24 @@ function clearOutside(map: Uint8Array, wx: number, wz: number, dx: number, dz: n
   return true;
 }
 
-function tryGenerate(seed: number, rng: Rng): Layout | null {
+function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null {
   /* -- 1. the cell grid ------------------------------------------------ */
-  const [cols, rows] = rng.pick([[3, 2], [2, 3], [3, 3], [3, 3]] as [number, number][]);
+  const [cols, rows] = rng.pick(profile.shapes);
   const present = new Array<boolean>(cols * rows).fill(true);
-  if (cols * rows === 9) {
-    // Knock out one or two cells. Losing the middle one leaves a ring of rooms
-    // around an empty courtyard, which is the best training loop there is.
-    const drops = 1 + rng.int(2);
-    for (let tries = 0, dropped = 0; dropped < drops && tries < 30; tries++) {
-      const c = rng.int(9);
-      if (!present[c]) continue;
-      present[c] = false;
-      if (connectedCells(present, cols, rows)) dropped++;
-      else present[c] = true;
-    }
+  const dropCount = profile.drops[0] + rng.int(profile.drops[1] - profile.drops[0] + 1);
+  // Knocking cells out leaves courtyards and rings of rooms around them, the
+  // best training loops there are.
+  for (let tries = 0, dropped = 0; dropped < dropCount && tries < 40; tries++) {
+    const c = rng.int(cols * rows);
+    if (!present[c]) continue;
+    present[c] = false;
+    if (connectedCells(present, cols, rows)) dropped++;
+    else present[c] = true;
   }
 
-  const usableW = MAP_W - MARGIN * 2;
-  const usableH = MAP_H - MARGIN * 2;
+  const [mapW, mapH] = profile.size;
+  const usableW = mapW - MARGIN * 2;
+  const usableH = mapH - MARGIN * 2;
   const cells: (Cell | null)[] = [];
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
@@ -354,26 +419,62 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   }
 
   /* -- 2. rooms: each one covers its cell's core so neighbours line up -- */
-  const rooms = new Map<number, Rect>();
+  const cellRect = new Map<number, Rect>();
   for (let i = 0; i < cells.length; i++) {
     const c = cells[i];
     if (!c) continue;
     const coreX = Math.floor((c.x0 + c.x1) / 2) - 2;
     const coreZ = Math.floor((c.z0 + c.z1) / 2) - 2;
-    const [x, w] = span(rng, c.x0 + 1, c.x1 - 1, coreX, coreX + 5, 8, 15);
-    const [z, h] = span(rng, c.z0 + 1, c.z1 - 1, coreZ, coreZ + 5, 8, 15);
-    rooms.set(i, { x, z, w, h });
+    const [x, w] = span(rng, c.x0 + 1, c.x1 - 1, coreX, coreX + 5, profile.room[0], profile.room[1]);
+    const [z, h] = span(rng, c.z0 + 1, c.z1 - 1, coreZ, coreZ + 5, profile.room[0], profile.room[1]);
+    cellRect.set(i, { x, z, w, h });
   }
 
-  /* -- 3. the graph: spanning tree + extra links for loops ------------- */
-  const edges: Edge[] = [];
+  const allEdges: Edge[] = [];
   for (let i = 0; i < cells.length; i++) {
     const c = cells[i];
     if (!c) continue;
-    if (c.col + 1 < cols && cells[i + 1]) edges.push({ a: i, b: i + 1, horizontal: true });
-    if (c.row + 1 < rows && cells[i + cols]) edges.push({ a: i, b: i + cols, horizontal: false });
+    if (c.col + 1 < cols && cells[i + 1]) allEdges.push({ a: i, b: i + 1, horizontal: true });
+    if (c.row + 1 < rows && cells[i + cols]) allEdges.push({ a: i, b: i + cols, horizontal: false });
   }
-  shuffle(rng, edges);
+
+  // Merge a few neighbouring cells into single great halls.
+  const zoneOf = new Map<number, number>();
+  for (const i of cellRect.keys()) zoneOf.set(i, i);
+  const mergeCount = profile.merges[0] + rng.int(profile.merges[1] - profile.merges[0] + 1);
+  const mergeable = shuffle(rng, [...allEdges]);
+  let merged = 0;
+  for (const e of mergeable) {
+    if (merged >= mergeCount) break;
+    if (zoneOf.get(e.a) !== e.a || zoneOf.get(e.b) !== e.b) continue;
+    if ([...zoneOf.values()].filter((v) => v === e.a || v === e.b).length !== 2) continue;
+    const A = cellRect.get(e.a) as Rect;
+    const B = cellRect.get(e.b) as Rect;
+    const x = Math.min(A.x, B.x);
+    const z = Math.min(A.z, B.z);
+    const union: Rect = { x, z, w: Math.max(A.x + A.w, B.x + B.w) - x, h: Math.max(A.z + A.h, B.z + B.h) - z };
+    cellRect.set(e.a, union);
+    cellRect.delete(e.b);
+    zoneOf.set(e.b, e.a);
+    merged++;
+  }
+
+  /* -- 3. the graph over rooms: spanning tree + extra links for loops ---- */
+  const roomIds = [...cellRect.keys()];
+  const seenPair = new Set<string>();
+  const edges: Edge[] = [];
+  for (const e of shuffle(rng, allEdges)) {
+    const a = zoneOf.get(e.a) as number;
+    const b = zoneOf.get(e.b) as number;
+    if (a === b) continue;
+    const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+    if (seenPair.has(key)) continue;
+    seenPair.add(key);
+    // Orientation follows the two cells the link runs between.
+    const left = cells[e.a] as Cell;
+    const right = cells[e.b] as Cell;
+    edges.push({ a, b, horizontal: left.row === right.row, fromCell: e.a, toCell: e.b });
+  }
   const parent = new Map<number, number>();
   const find = (x: number): number => {
     while (parent.has(x) && parent.get(x) !== x) x = parent.get(x) as number;
@@ -392,11 +493,10 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
     }
   }
   if (!spare.length) return null;
-  // At least one loop, usually two or three.
+  // At least one loop, usually several.
   chosen.push(spare[0]);
-  for (let i = 1; i < spare.length; i++) if (rng.chance(0.55)) chosen.push(spare[i]);
+  for (let i = 1; i < spare.length; i++) if (rng.chance(profile.loopChance)) chosen.push(spare[i]);
 
-  const roomIds = [...rooms.keys()];
   const adj = new Map<number, number[]>(roomIds.map((id) => [id, []]));
   for (const e of chosen) {
     (adj.get(e.a) as number[]).push(e.b);
@@ -422,67 +522,79 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   const startCell = startCandidates[rng.weighted(startCandidates.map((id) => (adj.get(id) as number[]).length ** 2))];
   const depth = depthFrom(startCell);
   const maxDepth = Math.max(...depth.values());
-  const farthest = roomIds.filter((id) => depth.get(id) === maxDepth);
-  const powerCell = rng.pick(farthest);
+  const powerCell = rng.pick(roomIds.filter((id) => depth.get(id) === maxDepth));
 
   const themes = new Map<number, ThemeId>();
-  themes.set(startCell, rng.pick(START_THEMES));
-  themes.set(powerCell, 'generator');
-  const pool = shuffle(rng, OTHER_THEMES.filter((t) => t !== themes.get(startCell)));
+  themes.set(startCell, rng.pick(profile.startThemes));
+  themes.set(powerCell, profile.powerTheme);
+  let pool: ThemeId[] = [];
   for (const id of roomIds) {
     if (themes.has(id)) continue;
-    themes.set(id, pool.length ? (pool.shift() as ThemeId) : rng.pick(OTHER_THEMES));
+    if (!pool.length) pool = shuffle(rng, [...profile.themes]);
+    themes.set(id, pool.shift() as ThemeId);
   }
 
   const usedNames = new Set<string>();
   const zones: ZoneDef[] = [];
-  const zoneOfCell = new Map<number, ZoneDef>();
+  const zoneOfRoom = new Map<number, ZoneDef>();
   for (const id of roomIds) {
     const theme = themes.get(id) as ThemeId;
-    const names = THEME_NAMES[theme].filter((n) => !usedNames.has(n));
-    const name = names.length ? rng.pick(names) : `${THEME_NAMES[theme][0]} ${zones.length + 1}`;
+    const list = profile.names?.[theme] ?? THEME_NAMES[theme];
+    const names = list.filter((n) => !usedNames.has(n));
+    const name = names.length ? rng.pick(names) : `${list[0]} ${String.fromCharCode(66 + zones.length % 20)}`;
     usedNames.add(name);
-    const zone: ZoneDef = { id: `z${id}`, theme, name, rect: rooms.get(id) as Rect, pillars: [] };
+    const zone: ZoneDef = { id: `z${id}`, theme, name, rect: cellRect.get(id) as Rect, pillars: [] };
     zones.push(zone);
-    zoneOfCell.set(id, zone);
+    zoneOfRoom.set(id, zone);
   }
 
-  /* -- 5. corridors and doors -------------------------------------------- */
+  /* -- 5. passages and doors --------------------------------------------- */
   const corridors: Rect[] = [];
   const doorDefs: DoorDef[] = [];
   const openLinks: [ZoneId, ZoneId][] = [];
   for (const e of chosen) {
-    const A = rooms.get(e.a) as Rect;
-    const B = rooms.get(e.b) as Rect;
-    const za = zoneOfCell.get(e.a) as ZoneDef;
-    const zb = zoneOfCell.get(e.b) as ZoneDef;
-    let rect: Rect;
-    let door: Rect;
-    if (e.horizontal) {
-      const lo = Math.max(A.z, B.z) + 1;
-      const hi = Math.min(A.z + A.h, B.z + B.h) - 4;
-      if (hi < lo) return null;
-      const cz = lo + rng.int(hi - lo + 1);
-      rect = { x: A.x + A.w, z: cz, w: B.x - (A.x + A.w), h: 3 };
-      door = { x: rect.x + rng.int(rect.w), z: cz, w: 1, h: 3 };
-    } else {
-      const lo = Math.max(A.x, B.x) + 1;
-      const hi = Math.min(A.x + A.w, B.x + B.w) - 4;
-      if (hi < lo) return null;
-      const cx = lo + rng.int(hi - lo + 1);
-      rect = { x: cx, z: A.z + A.h, w: 3, h: B.z - (A.z + A.h) };
-      door = { x: cx, z: rect.z + rng.int(rect.h), w: 3, h: 1 };
+    // Order the pair so A is left of / above B.
+    const fromCell = cells[e.fromCell as number] as Cell;
+    const toCell = cells[e.toCell as number] as Cell;
+    const aFirst = e.horizontal ? fromCell.col < toCell.col : fromCell.row < toCell.row;
+    const idA = aFirst ? e.a : e.b;
+    const idB = aFirst ? e.b : e.a;
+    const A = cellRect.get(idA) as Rect;
+    const B = cellRect.get(idB) as Rect;
+    const za = zoneOfRoom.get(idA) as ZoneDef;
+    const zb = zoneOfRoom.get(idB) as ZoneDef;
+    let width = profile.corridorWidth[0] + rng.int(profile.corridorWidth[1] - profile.corridorWidth[0] + 1);
+    let rect: Rect | null = null;
+    let door: Rect | null = null;
+    for (; width >= 3 && !rect; width--) {
+      if (e.horizontal) {
+        if (B.x <= A.x + A.w) return null;
+        const lo = Math.max(A.z, B.z) + 1;
+        const hi = Math.min(A.z + A.h, B.z + B.h) - 1 - width;
+        if (hi < lo) continue;
+        const cz = lo + rng.int(hi - lo + 1);
+        rect = { x: A.x + A.w, z: cz, w: B.x - (A.x + A.w), h: width };
+        door = { x: rect.x + rng.int(rect.w), z: cz, w: 1, h: width };
+      } else {
+        if (B.z <= A.z + A.h) return null;
+        const lo = Math.max(A.x, B.x) + 1;
+        const hi = Math.min(A.x + A.w, B.x + B.w) - 1 - width;
+        if (hi < lo) continue;
+        const cx = lo + rng.int(hi - lo + 1);
+        rect = { x: cx, z: A.z + A.h, w: width, h: B.z - (A.z + A.h) };
+        door = { x: cx, z: rect.z + rng.int(rect.h), w: width, h: 1 };
+      }
     }
-    if (rect.w < 1 || rect.h < 1) return null;
+    if (!rect || !door || rect.w < 1 || rect.h < 1) return null;
     corridors.push(rect);
 
-    const touchesStart = e.a === startCell || e.b === startCell;
-    if (!touchesStart && rng.chance(0.2)) {
+    const touchesStart = idA === startCell || idB === startCell;
+    if (!touchesStart && rng.chance(profile.archwayChance)) {
       openLinks.push([za.id, zb.id]);
       continue;
     }
-    const far = (depth.get(e.a) as number) >= (depth.get(e.b) as number) ? za : zb;
-    const d = Math.max(depth.get(e.a) as number, depth.get(e.b) as number);
+    const far = (depth.get(idA) as number) >= (depth.get(idB) as number) ? za : zb;
+    const d = Math.max(depth.get(idA) as number, depth.get(idB) as number);
     const cost = Math.min(1500, 500 + 250 * (d + rng.int(2)));
     doorDefs.push({
       id: `d${doorDefs.length}`,
@@ -497,8 +609,16 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   /* -- 6. pillars -------------------------------------------------------- */
   for (const zone of zones) {
     const r = zone.rect;
-    if (!PILLAR_THEMES.has(zone.theme) || r.w < 11 || r.h < 11 || !rng.chance(0.65)) continue;
-    const style = rng.int(3);
+    if (!PILLAR_THEMES.has(zone.theme) || r.w < 11 || r.h < 11) continue;
+    if (HALL_THEMES.has(zone.theme) && r.w >= 16 && r.h >= 16) {
+      // A great hall: rows of columns every five tiles.
+      for (let z = r.z + 4; z < r.z + r.h - 4; z += 5) {
+        for (let x = r.x + 4; x < r.x + r.w - 4; x += 5) zone.pillars.push({ tx: x, tz: z });
+      }
+      continue;
+    }
+    if (!rng.chance(0.65)) continue;
+    const style = zone.theme === 'square' ? 1 : rng.int(3);
     if (style === 0) {
       for (const [px, pz] of [[r.x + 3, r.z + 3], [r.x + r.w - 4, r.z + 3], [r.x + 3, r.z + r.h - 4], [r.x + r.w - 4, r.z + r.h - 4]]) {
         zone.pillars.push({ tx: px, tz: pz });
@@ -534,17 +654,20 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   });
 
   /* -- 8. windows ----------------------------------------------------------- */
-  const startZone = zoneOfCell.get(startCell) as ZoneDef;
-  const powerZone = zoneOfCell.get(powerCell) as ZoneDef;
+  const startZone = zoneOfRoom.get(startCell) as ZoneDef;
+  const powerZone = zoneOfRoom.get(powerCell) as ZoneDef;
   const barricades: BarricadeDef[] = [];
   for (const zone of zones) {
-    const want = zone === startZone ? 3 + rng.int(2) : zone === powerZone ? 2 : 2 + rng.int(2);
+    const perimeter = (zone.rect.w + zone.rect.h) * 2;
+    const [lo, hi] = profile.windows;
+    let want = Math.max(lo, Math.min(hi, Math.round(perimeter / 16) + rng.int(2)));
+    if (zone === startZone) want = Math.max(want, 3);
     const slots = shuffle(rng, wallSlots(tiles, zone)).filter((s) =>
       clearOutside(tiles, s.tx - s.nx, s.tz - s.nz, -s.nx, -s.nz));
     const picked: { tx: number; tz: number }[] = [];
     for (const s of slots) {
       if (picked.length >= want) break;
-      if (picked.some((p) => Math.abs(p.tx - s.tx) + Math.abs(p.tz - s.tz) < 3)) continue;
+      if (picked.some((p) => Math.abs(p.tx - s.tx) + Math.abs(p.tz - s.tz) < 4)) continue;
       picked.push(s);
       const wx = s.tx - s.nx;
       const wz = s.tz - s.nz;
@@ -611,6 +734,8 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
     if (!slot) return null;
     wallBuys.push({ ...slot, weapon });
   }
+  const exit = takeSlot(startZone);
+  if (!exit) return null;
 
   const others = shuffle(rng, zones.filter((z) => z !== startZone && z !== powerZone));
   const perkQueue = shuffle(rng, [...OTHER_PERKS]);
@@ -620,12 +745,47 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   }
   if (perkQueue.length) return null;
 
+  // The three quest parts go to three different rooms spread through the map:
+  // one near the start, one halfway, one deep in.
+  const depthOfZone = (z: ZoneDef): number => {
+    for (const [id, zone] of zoneOfRoom) if (zone === z) return depth.get(id) as number;
+    return 0;
+  };
+  const byDepth = [...others, powerZone].sort((a, b) => depthOfZone(a) - depthOfZone(b));
+  if (byDepth.length < 3) return null;
+  const parts: WallProp[] = [];
+  const partZones = new Set<ZoneDef>();
+  for (const f of [0, 0.5, 1]) {
+    const want = Math.round(f * (byDepth.length - 1));
+    for (let k = 0; k < byDepth.length && parts.length < 3; k++) {
+      const z = byDepth[(want + k) % byDepth.length];
+      if (partZones.has(z)) continue;
+      const slot = takeSlot(z);
+      if (!slot) continue;
+      parts.push(slot);
+      partZones.add(z);
+      break;
+    }
+  }
+  if (parts.length < 3) return null;
+
+  // The workbench sits somewhere in the middle of the map, never in the start room.
+  const benchRooms = byDepth.filter((z) => z !== powerZone);
+  let workbench: WallProp | null = null;
+  for (let k = 0; k < benchRooms.length && !workbench; k++) {
+    workbench = takeSlot(benchRooms[(Math.floor(benchRooms.length / 2) + k) % benchRooms.length]);
+  }
+  if (!workbench) return null;
+
   const second = wallBuys[1].weapon === 'trench' ? 'grease' : 'trench';
   const gunQueue = shuffle(rng, [...OTHER_GUNS, second]);
   const gunRooms = [powerZone, ...others];
-  for (let i = 0; gunQueue.length && i < gunRooms.length; i++) {
+  for (let i = 0; i < gunRooms.length; i++) {
+    // Once the special guns are placed, bigger maps get the everyday ones again.
+    const weapon = gunQueue.length ? gunQueue.shift() as string : rng.chance(0.6) ? rng.pick(FILLER_GUNS) : null;
+    if (!weapon) continue;
     const slot = takeSlot(gunRooms[i]);
-    if (slot) wallBuys.push({ ...slot, weapon: gunQueue.shift() as string });
+    if (slot) wallBuys.push({ ...slot, weapon });
   }
 
   const boxPads: WallProp[] = [];
@@ -640,7 +800,7 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
   const cx = r.x + (r.w >> 1);
   const cz = r.z + (r.h >> 1);
   let spawnTile: { tx: number; tz: number } | null = null;
-  for (let rad = 0; rad < 6 && !spawnTile; rad++) {
+  for (let rad = 0; rad < 8 && !spawnTile; rad++) {
     for (let dz = -rad; dz <= rad && !spawnTile; dz++) {
       for (let dx = -rad; dx <= rad; dx++) {
         const tx = cx + dx;
@@ -666,6 +826,9 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
 
   return {
     seed,
+    map: profile.id,
+    mapName: profile.name,
+    corridorLook: profile.corridorLook,
     zones,
     corridors,
     doors: doorDefs,
@@ -676,6 +839,9 @@ function tryGenerate(seed: number, rng: Rng): Layout | null {
     boxPads,
     powerSwitch,
     pack,
+    parts,
+    workbench,
+    exit,
     spawn: { tx: spawnTile.tx, tz: spawnTile.tz, yaw },
     spawnZone: startZone.id,
     powerZone: powerZone.id,
@@ -724,6 +890,14 @@ export function validateLayout(L: Layout): string[] {
   L.boxPads.forEach((p, i) => stand(`box pad ${i}`, p, true));
   stand('power switch', L.powerSwitch, true);
   stand('pack-a-punch', L.pack, true);
+  L.parts.forEach((p, i) => stand(`quest part ${i}`, p, true));
+  stand('workbench', L.workbench, true);
+  stand('exit', L.exit, true);
+  if (L.parts.length !== 3) errs.push('there must be three quest parts');
+  if (new Set(L.parts.map((p) => p.zone)).size !== L.parts.length) errs.push('two quest parts share a room');
+  if (L.parts.some((p) => p.zone === L.spawnZone)) errs.push('a quest part is in the start room');
+  if (L.workbench.zone === L.spawnZone) errs.push('the workbench is in the start room');
+  if (L.exit.zone !== L.spawnZone) errs.push('the exit is not in the start room');
 
   if (L.powerSwitch.zone !== L.powerZone || L.pack.zone !== L.powerZone) errs.push('power room is missing its machines');
   if (!L.perks.some((p) => p.perk === 'revive' && p.zone === L.spawnZone)) errs.push('no quick revive in the start room');
@@ -775,6 +949,9 @@ export function validateLayout(L: Layout): string[] {
     ...L.boxPads.map((p, i): [string, WallProp] => [`box pad ${i}`, p]),
     ['power switch', L.powerSwitch],
     ['pack-a-punch', L.pack],
+    ...L.parts.map((p, i): [string, WallProp] => [`quest part ${i}`, p]),
+    ['workbench', L.workbench],
+    ['exit', L.exit],
   ];
   for (const [what, p] of mustReach) {
     if (!reach.has(p.tz * MAP_W + p.tx)) errs.push(`${what} is unreachable`);
@@ -792,10 +969,10 @@ export function randomSeed(): number {
  * Builds a playable layout for a seed. The same seed always gives the same
  * asylum. Seeds whose first roll breaks a rule are re-rolled deterministically.
  */
-export function generateLayout(seed: number): Layout {
-  for (let attempt = 0; attempt < 200; attempt++) {
+export function generateLayout(seed: number, profile: MapProfile = MAPS.asylum): Layout {
+  for (let attempt = 0; attempt < 300; attempt++) {
     const rng = new Rng((seed * 2654435761 + attempt * 0x9e3779b9) >>> 0);
-    const layout = tryGenerate(seed, rng);
+    const layout = tryGenerate(seed, rng, profile);
     if (layout && validateLayout(layout).length === 0) return layout;
   }
   throw new Error(`could not generate a playable layout for seed ${seed}`);

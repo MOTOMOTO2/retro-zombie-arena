@@ -24,12 +24,18 @@ import { GUN_IDS } from '../src/gfx/guns.ts';
 import { Rng } from '../src/core/rng.ts';
 import {
   BOX_POOL,
+  PAP_MAX,
+  RARITY_INFO,
   WEAPONS,
   boxWeights,
   fireInterval,
   getWeapon,
+  magFor,
+  papCost,
   reloadDuration,
+  reserveFor,
   shotDamage,
+  tierName,
 } from '../src/game/weapons.ts';
 import {
   PERK_INFO,
@@ -45,6 +51,12 @@ import {
   scoreForKill,
   spawnInterval,
 } from '../src/game/rules.ts';
+
+import { MAPS, MAP_ORDER } from '../src/world/maps.ts';
+import { BOSS_DELAY, Quest } from '../src/game/quest.ts';
+import { CHAPTERS, UNLOCK_ROUND, type StoryBeat } from '../src/game/story.ts';
+import { defaultProgress, isUnlocked, nextMap, recordRun } from '../src/game/progress.ts';
+import { BOSSES, bossHealth } from '../src/game/boss.ts';
 
 /** Every generated asylum must pass every rule; sweep a few hundred of them. */
 const SEEDS = Array.from({ length: 300 }, (_, i) => i + 1);
@@ -77,10 +89,10 @@ describe('generated arenas', () => {
     assert.ok(starts.size >= 3, 'the start room is always the same kind');
   });
 
-  it('builds six to eight themed rooms with at least one loop', () => {
+  it('builds nine to twelve themed rooms with at least one loop', () => {
     for (const seed of SEEDS.slice(0, 100)) {
       const L = generateLayout(seed);
-      assert.ok(L.zones.length >= 6 && L.zones.length <= 8, `seed ${seed}: ${L.zones.length} rooms`);
+      assert.ok(L.zones.length >= 9 && L.zones.length <= 12, `seed ${seed}: ${L.zones.length} rooms`);
       // A spanning tree has rooms - 1 corridors; anything more is a loop to train in.
       assert.ok(L.corridors.length >= L.zones.length, `seed ${seed} has no loop`);
       assert.equal(new Set(L.zones.map((z) => z.name)).size, L.zones.length, 'duplicate room names');
@@ -337,14 +349,14 @@ describe('weapons', () => {
 
   it('stacks damage modifiers in the right order', () => {
     const w = getWeapon('sidearm');
-    const base = shotDamage(w, { head: false, doubleTap: false, instaKill: false, packed: false });
-    const head = shotDamage(w, { head: true, doubleTap: false, instaKill: false, packed: false });
-    const packed = shotDamage(w, { head: false, doubleTap: false, instaKill: false, packed: true });
+    const base = shotDamage(w, { head: false, doubleTap: false, instaKill: false, tier: 0 });
+    const head = shotDamage(w, { head: true, doubleTap: false, instaKill: false, tier: 0 });
+    const packed = shotDamage(w, { head: false, doubleTap: false, instaKill: false, tier: 1 });
     assert.equal(base, w.damage);
     assert.equal(head, w.damage * w.headMult);
     assert.ok(packed > base);
     assert.ok(
-      shotDamage(w, { head: false, doubleTap: false, instaKill: true, packed: false }) > 1e5,
+      shotDamage(w, { head: false, doubleTap: false, instaKill: true, tier: 0 }) > 1e5,
     );
   });
 
@@ -354,6 +366,40 @@ describe('weapons', () => {
     assert.ok(!BOX_POOL.includes('knife'));
     assert.ok(BOX_POOL.includes('plasma'));
     assert.equal(boxWeights().length, BOX_POOL.length);
+  });
+
+  it('rolls the box by rarity, with a 5% shot at a legendary', () => {
+    const w = boxWeights();
+    const total = w.reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(total - 1) < 1e-9, `box odds sum to ${total}`);
+    const legendary = BOX_POOL.filter((id, i) => WEAPONS[id].rarity === 'legendary' && w[i] > 0);
+    assert.ok(legendary.length >= 3, 'the box needs legendary guns');
+    const share = BOX_POOL.reduce((a, id, i) => a + (WEAPONS[id].rarity === 'legendary' ? w[i] : 0), 0);
+    assert.ok(Math.abs(share - RARITY_INFO.legendary.odds) < 1e-9);
+    for (const id of BOX_POOL) assert.ok(WEAPONS[id].rarity, `${id} has no rarity`);
+  });
+
+  it('never offers a gun the player is already carrying', () => {
+    const owned = ['boomstick', 'stormcaller'];
+    const w = boxWeights(owned);
+    for (const id of owned) assert.equal(w[BOX_POOL.indexOf(id)], 0);
+    assert.ok(Math.abs(w.reduce((a, b) => a + b, 0) - 1) < 1e-9);
+  });
+
+  it('packs a gun three tiers deep, each one stronger', () => {
+    const w = getWeapon('trench');
+    let prev = 0;
+    for (let tier = 0; tier <= PAP_MAX; tier++) {
+      const d = shotDamage(w, { head: false, doubleTap: false, instaKill: false, tier });
+      assert.ok(d > prev, `tier ${tier} is not stronger`);
+      prev = d;
+      assert.ok(magFor(w, tier) >= w.magSize);
+      assert.ok(reserveFor(w, tier) >= w.reserveMax);
+    }
+    assert.ok(magFor(w, 3) > magFor(w, 1));
+    assert.ok(papCost(0) > 0 && papCost(2) >= papCost(1));
+    assert.equal(tierName('X', 0), 'X');
+    assert.notEqual(tierName('X', 2), tierName('X', 1));
   });
 });
 
@@ -380,5 +426,166 @@ describe('rng', () => {
     for (let i = 0; i < 6000; i++) counts[r.weighted([0, 1, 3])]++;
     assert.equal(counts[0], 0, 'a zero weight must never be picked');
     assert.ok(counts[2] > counts[1] * 2, `expected ~3:1, got ${counts[2]}:${counts[1]}`);
+  });
+});
+
+describe('maps', () => {
+  it('every map generates valid layouts across many seeds', () => {
+    for (const id of MAP_ORDER) {
+      for (let seed = 1; seed <= 60; seed++) {
+        const L = generateLayout(seed, MAPS[id]);
+        assert.equal(L.map, id);
+        const errs = validateLayout(L);
+        assert.deepEqual(errs, [], `${id} seed ${seed}: ${errs.join('; ')}`);
+      }
+    }
+  });
+
+  it('the new maps are much bigger than the asylum', () => {
+    const floorOf = (id: keyof typeof MAPS): number => {
+      let total = 0;
+      for (let seed = 1; seed <= 20; seed++) {
+        const L = generateLayout(seed, MAPS[id]);
+        for (const t of L.tiles) if (t === T_FLOOR) total++;
+      }
+      return total / 20;
+    };
+    const asylum = floorOf('asylum');
+    for (const id of ['town', 'foundry', 'labs'] as const) {
+      assert.ok(floorOf(id) > asylum * 1.2, `${id} should have more floor than the asylum`);
+    }
+  });
+
+  it('parts are spread across three rooms and the exit is in the start room', () => {
+    for (const id of MAP_ORDER) {
+      const L = generateLayout(99, MAPS[id]);
+      assert.equal(L.parts.length, 3);
+      assert.equal(new Set(L.parts.map((p) => p.zone)).size, 3);
+      assert.equal(L.exit.zone, L.spawnZone);
+      assert.notEqual(L.workbench.zone, L.spawnZone);
+    }
+  });
+});
+
+describe('story and objectives', () => {
+  it('every map has a chapter with everything the run needs', () => {
+    const beats: StoryBeat[] = ['start', 'power', 'part', 'parts', 'built', 'boss', 'bossDown'];
+    MAP_ORDER.forEach((id, i) => {
+      const c = CHAPTERS[id];
+      assert.equal(c.map, id);
+      assert.equal(c.number, i + 1);
+      assert.equal(c.parts.length, 3);
+      assert.ok(c.briefing.length > 0 && c.ending.length > 0);
+      for (const b of beats) assert.ok(c.radio[b]?.length, `${id} has nothing to say about ${b}`);
+      assert.ok(BOSSES[c.boss], `${id} names a boss that does not exist`);
+    });
+  });
+
+  it('runs power, parts, build, boss and escape in order', () => {
+    const q = new Quest('asylum');
+    assert.equal(q.stage, 'power');
+    assert.equal(q.canBuild, false);
+    // Parts can be found before the power is on, but nothing can be built.
+    assert.deepEqual(q.takePart(1), ['part']);
+    assert.deepEqual(q.takePart(1), [], 'a part is only picked up once');
+    assert.equal(q.stage, 'power');
+    assert.deepEqual(q.powerOn(), ['power']);
+    assert.deepEqual(q.powerOn(), []);
+    assert.equal(q.stage, 'parts');
+    q.takePart(0);
+    assert.equal(q.canBuild, false);
+    assert.deepEqual(q.takePart(2), ['parts']);
+    assert.equal(q.stage, 'build');
+    assert.deepEqual(q.build(), ['built']);
+    assert.deepEqual(q.build(), [], 'it is only built once');
+    assert.equal(q.boss, 'coming');
+    assert.equal(q.canEscape, false);
+    assert.equal(q.tick(BOSS_DELAY / 2), false);
+    assert.equal(q.tick(BOSS_DELAY), true);
+    assert.equal(q.tick(0.1), true, 'keeps asking until the boss actually turns up');
+    assert.deepEqual(q.bossArrived(), ['boss']);
+    assert.equal(q.tick(1), false);
+    assert.equal(q.stage, 'boss');
+    assert.deepEqual(q.escape(), [], 'no escaping with the boss alive');
+    assert.deepEqual(q.bossKilled(), ['bossDown']);
+    assert.equal(q.stage, 'escape');
+    assert.deepEqual(q.escape(), ['escaped']);
+    assert.equal(q.stage, 'done');
+  });
+
+  it('shows the objectives that matter right now', () => {
+    const q = new Quest('town');
+    const first = q.objectives();
+    assert.equal(first.length, 3);
+    assert.ok(first.every((o) => !o.done));
+    q.powerOn();
+    assert.equal(q.objectives()[0].done, true);
+    q.takePart(0);
+    assert.match(q.objectives()[1].text, /1\/3/);
+    q.takePart(1);
+    q.takePart(2);
+    q.build();
+    q.tick(BOSS_DELAY);
+    q.bossArrived();
+    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.town.bossName));
+    q.bossKilled();
+    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.town.exit));
+  });
+});
+
+describe('unlocks', () => {
+  it('starts with only the first map open', () => {
+    const p = defaultProgress();
+    assert.equal(isUnlocked(p, 'asylum'), true);
+    for (const id of MAP_ORDER.slice(1)) assert.equal(isUnlocked(p, id), false);
+  });
+
+  it('escaping a map opens the next one', () => {
+    const p = defaultProgress();
+    const r = recordRun(p, 'asylum', { round: 6, kills: 80, points: 9000, escaped: true });
+    assert.equal(r.unlocked, 'town');
+    assert.equal(isUnlocked(p, 'town'), true);
+    assert.equal(isUnlocked(p, 'foundry'), false);
+    assert.equal(p.records.asylum?.escaped, true);
+    assert.equal(p.records.asylum?.fastestEscape, 6);
+    // Doing it again unlocks nothing new.
+    assert.equal(recordRun(p, 'asylum', { round: 4, kills: 50, points: 5000, escaped: true }).unlocked, null);
+    assert.equal(p.records.asylum?.fastestEscape, 4);
+  });
+
+  it('surviving long enough also opens the next map', () => {
+    const p = defaultProgress();
+    assert.equal(recordRun(p, 'asylum', { round: UNLOCK_ROUND - 1, kills: 1, points: 1, escaped: false }).unlocked, null);
+    assert.equal(recordRun(p, 'asylum', { round: UNLOCK_ROUND, kills: 1, points: 1, escaped: false }).unlocked, 'town');
+  });
+
+  it('keeps the best round per map', () => {
+    const p = defaultProgress();
+    recordRun(p, 'asylum', { round: 9, kills: 100, points: 20000, escaped: false });
+    const r = recordRun(p, 'asylum', { round: 5, kills: 40, points: 4000, escaped: false });
+    assert.equal(r.best, false);
+    assert.equal(p.records.asylum?.bestRound, 9);
+  });
+
+  it('the last map unlocks nothing', () => {
+    assert.equal(nextMap('labs'), null);
+    const p = defaultProgress();
+    assert.equal(recordRun(p, 'labs', { round: 30, kills: 1, points: 1, escaped: true }).unlocked, null);
+  });
+});
+
+describe('bosses', () => {
+  it('each boss is tougher than the last', () => {
+    const order = MAP_ORDER.map((id) => BOSSES[CHAPTERS[id].boss].health);
+    for (let i = 1; i < order.length; i++) assert.ok(order[i] > order[i - 1]);
+  });
+
+  it('scale with the round they turn up in', () => {
+    for (const id of Object.keys(BOSSES) as (keyof typeof BOSSES)[]) {
+      assert.ok(bossHealth(id, 3) >= BOSSES[id].health * 0.6, 'an early boss is still a boss');
+      assert.ok(bossHealth(id, 20) > bossHealth(id, 10));
+      assert.ok(bossHealth(id, 10) > bossHealth(id, 5));
+      assert.ok(bossHealth(id, 10) > enemyHealth(10) * 15, 'a boss is worth many zombies');
+    }
   });
 });

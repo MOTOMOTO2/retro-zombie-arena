@@ -36,10 +36,15 @@
 
         <div class="hud-corner bottom-right">
           <div id="weapon-name">PEACEKEEPER .45</div>
+          <div id="weapon-mod"></div>
           <div id="ammo"><span id="mag">8</span><span class="slash">/</span><span id="reserve">64</span></div>
           <div id="nades">GRENADES <b>2</b></div>
         </div>
 
+        <div id="objective"><div class="label">OBJECTIVE</div><ul id="objective-list"></ul></div>
+        <div id="boss-bar" class="hidden"><div id="boss-name"></div><div class="track"><div id="boss-fill"></div></div></div>
+        <div id="waypoint" class="hidden"><i></i><span id="waypoint-dist"></span></div>
+        <div id="radio" class="hidden"><div class="who"><i></i><span id="radio-who">DR. VOSS</span></div><div id="radio-text"></div></div>
         <div id="prompt"></div>
         <div id="toast"></div>
         <div id="banner"></div>
@@ -58,13 +63,29 @@
             <span class="t2">ZOMBIE</span>
             <span class="t3">ARENA</span>
           </h1>
-          <p class="tagline">ST. MERCY ASYLUM &mdash; SURVIVE THE NIGHT</p>
+          <p class="tagline">FOUR NIGHTS &mdash; ONE WAY OUT</p>
 
           <div id="menu-main" class="panel">
-            <button id="btn-play" class="btn primary">START GAME</button>
+            <button id="btn-play" class="btn primary">PLAY</button>
             <button id="btn-howto" class="btn">HOW TO PLAY</button>
             <button id="btn-settings" class="btn">SETTINGS</button>
             <div id="best" class="best"></div>
+          </div>
+
+          <div id="menu-maps" class="panel wide hidden">
+            <h2>CHOOSE A CHAPTER</h2>
+            <div id="map-cards" class="cards"></div>
+            <div class="hint">EVERY MAP IS REBUILT FROM A NEW SEED EACH TIME YOU PLAY</div>
+            <button class="btn back">BACK</button>
+          </div>
+
+          <div id="menu-brief" class="panel wide hidden">
+            <div id="brief-chapter" class="kicker"></div>
+            <h2 id="brief-title"></h2>
+            <div id="brief-text" class="story"></div>
+            <ol id="brief-steps" class="steps"></ol>
+            <button id="btn-begin" class="btn primary">BEGIN</button>
+            <button id="btn-brief-back" class="btn">BACK</button>
           </div>
 
           <div id="menu-howto" class="panel hidden">
@@ -89,7 +110,10 @@
                 <p><b>EARN POINTS</b> by hitting and killing the dead. Spend them on
                   doors, wall guns, the mystery box and perk machines.</p>
                 <p><b>HOLD F</b> at a boarded window to nail the planks back on.</p>
-                <p><b>FIND THE GENERATOR.</b> The asylum is different every night, but the power is always as far from the front door as it can be. No power, no perks.</p>
+                <p><b>EVERY CHAPTER HAS A WAY OUT.</b> Restore the power, find the three parts, build what Voss asks for at the workbench &mdash; then survive what comes for you, and escape. The yellow-green marker shows where to go next.</p>
+                <p><b>FIND THE GENERATOR.</b> The map is different every night, but the power is always as far from the start as it can be. No power, no perks, no Pack-a-Punch.</p>
+                <p><b>MYSTERY BOX</b> rolls a random gun &mdash; sometimes a legendary. <b>PACK-A-PUNCH</b> takes a gun three tiers deep.</p>
+                <p><b>BOSSES</b> telegraph every move. Jump over a slam, sidestep a charge &mdash; a boss that hits a wall is stunned.</p>
                 <p><b>EVERY FIFTH ROUND</b> the hellhounds come instead. They are fast.
                   The last one always drops max ammo.</p>
                 <p><b>KEEP MOVING.</b> Nothing in here out-runs a trained horde except
@@ -156,13 +180,31 @@
         </div>
       </div>
 
+      <div id="victory" class="overlay hidden">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <h1 class="title small"><span class="t3">ESCAPED</span></h1>
+          <div id="win-chapter" class="kicker"></div>
+          <div class="panel wide">
+            <div id="win-story" class="story"></div>
+            <div id="win-stats" class="stats"></div>
+            <div id="win-unlock" class="unlock hidden"></div>
+            <button id="btn-next" class="btn primary">NEXT CHAPTER</button>
+            <button id="btn-win-maps" class="btn">CHAPTER SELECT</button>
+            <button id="btn-win-menu" class="btn">MAIN MENU</button>
+          </div>
+        </div>
+      </div>
+
       <div id="gameover" class="overlay hidden">
         <div class="scanlines"></div>
         <div class="menu-inner">
           <h1 class="title small"><span class="t1">YOU</span> <span class="t3">DIED</span></h1>
           <div class="panel">
             <div id="go-stats" class="stats"></div>
+            <div id="go-unlock" class="unlock hidden"></div>
             <button id="btn-again" class="btn primary">TRY AGAIN</button>
+            <button id="btn-go-maps" class="btn">CHAPTER SELECT</button>
             <button id="btn-menu" class="btn">MAIN MENU</button>
           </div>
         </div>
@@ -171,7 +213,7 @@
       <div id="click-to-play" class="hidden">CLICK TO LOOK AROUND</div>
       <div id="boot" class="overlay">
         <div class="menu-inner">
-          <div class="boot-text">LOADING ST. MERCY ASYLUM&hellip;</div>
+          <div class="boot-text">LOADING&hellip;</div>
         </div>
       </div>
     </div>

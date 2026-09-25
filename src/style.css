@@ -104,6 +104,7 @@ html, body {
 }
 
 #weapon-name { font-size: 15px; color: var(--bone); opacity: 0.9; }
+#weapon-mod { font-size: 11px; letter-spacing: 0.25em; min-height: 13px; text-shadow: 0 0 8px currentColor; }
 #ammo { font-size: 42px; line-height: 1; color: var(--amber); }
 #ammo.low { color: var(--blood); animation: blink 0.6s steps(2) infinite; }
 #ammo .slash { opacity: 0.4; margin: 0 4px; font-size: 26px; }
@@ -240,7 +241,7 @@ html, body {
 #toast {
   position: absolute;
   left: 50%;
-  top: 22%;
+  top: 31%;
   transform: translateX(-50%);
   text-align: center;
   font-size: 30px;
@@ -269,13 +270,113 @@ html, body {
 #powerup-timers {
   position: absolute;
   left: 50%;
-  top: 8%;
+  top: 13%;
   transform: translateX(-50%);
   display: flex;
   gap: 14px;
   font-size: 13px;
 }
 #powerup-timers .pw { padding: 3px 9px; border: 2px solid currentColor; }
+
+/* What to do next, under the wallet. */
+#objective {
+  position: absolute;
+  left: 22px;
+  top: 96px;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  max-width: 340px;
+}
+#objective .label { margin-bottom: 4px; color: var(--amber); opacity: 0.9; }
+#objective-list { list-style: none; margin: 0; padding: 0; line-height: 1.7; }
+#objective-list li::before { content: '\25B8  '; color: var(--amber); }
+#objective-list li.done { opacity: 0.4; text-decoration: line-through; }
+#objective-list li.done::before { content: '\2713  '; color: var(--green); }
+#objective-list li.new { animation: objin 0.9s ease-out; }
+@keyframes objin { from { color: var(--amber); transform: translateX(-12px); } }
+
+/* Voss on the radio: a subtitle box that types itself out. */
+#radio {
+  position: absolute;
+  left: 50%;
+  bottom: 112px;
+  transform: translateX(-50%);
+  width: min(640px, 80vw);
+  background: rgba(6, 10, 8, 0.72);
+  border: 2px solid rgba(122, 255, 208, 0.35);
+  padding: 8px 14px 10px;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #d8f0e4;
+  animation: radioin 0.25s ease-out;
+}
+#radio .who { font-size: 11px; letter-spacing: 0.3em; color: #7affd0; margin-bottom: 3px; text-transform: uppercase; }
+#radio .who i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  background: #7affd0;
+  box-shadow: 0 0 8px #7affd0;
+  animation: blink 0.5s steps(2) infinite;
+}
+@keyframes radioin { from { opacity: 0; transform: translateX(-50%) translateY(10px); } }
+
+/* Boss health across the top of the screen. */
+#boss-bar {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  width: min(520px, 70vw);
+  text-align: center;
+}
+#boss-name { font-size: 15px; letter-spacing: 0.4em; color: var(--blood); margin-bottom: 5px; }
+#boss-bar .track {
+  height: 14px;
+  border: 2px solid rgba(232, 226, 206, 0.45);
+  background: rgba(0, 0, 0, 0.6);
+}
+#boss-fill {
+  height: 100%;
+  width: 100%;
+  background: repeating-linear-gradient(90deg, #d22f26 0 10px, #8a1a14 10px 12px);
+  box-shadow: 0 0 12px rgba(210, 47, 38, 0.8);
+  transition: width 0.15s linear;
+}
+#boss-bar.enraged #boss-fill { animation: blink 0.4s steps(2) infinite; }
+
+/* The objective marker: a diamond over the target, pinned to the edge when off screen. */
+#waypoint {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  color: #7affd0;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+#waypoint i {
+  position: absolute;
+  left: -7px;
+  top: -7px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  transform: rotate(45deg);
+  box-shadow: 0 0 8px currentColor;
+}
+#waypoint span {
+  position: absolute;
+  left: -40px;
+  top: 12px;
+  width: 80px;
+  text-align: center;
+}
+#waypoint.edge i { background: currentColor; opacity: 0.8; }
 
 #minimap {
   position: absolute;
@@ -445,6 +546,89 @@ html, body {
 .stats .k { color: var(--amber); }
 .stats .r { float: right; color: var(--bone); }
 
+/* ------------------------------------------------------- chapters */
+
+.panel.wide { max-width: 780px; margin: 0 auto; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+.card {
+  font-family: var(--font);
+  text-align: left;
+  color: var(--bone);
+  background: rgba(16, 16, 20, 0.92);
+  border: 2px solid rgba(232, 226, 206, 0.25);
+  padding: 12px 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 190px;
+  position: relative;
+}
+.card:hover, .card:focus-visible {
+  border-color: var(--amber);
+  outline: none;
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 #000;
+}
+.card .num { font-size: 11px; letter-spacing: 0.3em; color: var(--blood); }
+.card .name { font-size: 15px; letter-spacing: 0.12em; color: var(--amber); font-weight: bold; }
+.card .ttl { font-size: 11px; letter-spacing: 0.25em; opacity: 0.75; }
+.card .blurb { font-size: 11.5px; line-height: 1.45; opacity: 0.8; flex: 1; }
+.card .status { font-size: 10.5px; letter-spacing: 0.12em; color: var(--green); }
+.card.locked { cursor: not-allowed; filter: grayscale(1); opacity: 0.55; }
+.card.locked:hover { transform: none; box-shadow: none; border-color: rgba(232, 226, 206, 0.25); }
+.card.locked .status { color: var(--blood); }
+.card.done::after {
+  content: 'ESCAPED';
+  position: absolute;
+  top: 10px;
+  right: -6px;
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  background: var(--green);
+  color: #081004;
+  padding: 2px 8px;
+  transform: rotate(8deg);
+}
+
+.kicker { font-size: 12px; letter-spacing: 0.4em; color: var(--blood); }
+.story {
+  text-align: left;
+  font-size: 13.5px;
+  line-height: 1.65;
+  letter-spacing: 0.02em;
+  max-width: 620px;
+  opacity: 0.92;
+}
+.story p { margin: 0 0 10px; }
+.steps {
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.8;
+  letter-spacing: 0.1em;
+  margin: 4px 0 8px;
+  padding-left: 22px;
+  max-width: 620px;
+  width: 100%;
+}
+.steps li::marker { color: var(--amber); }
+.steps b { color: var(--amber); }
+.steps .boss { color: var(--blood); }
+.unlock {
+  font-size: 13px;
+  letter-spacing: 0.2em;
+  color: var(--amber);
+  border: 2px dashed rgba(255, 200, 77, 0.5);
+  padding: 8px 14px;
+  animation: blink 1.2s steps(2) 3;
+}
+
 .boot-text { letter-spacing: 0.3em; font-size: 14px; animation: blink 1s steps(2) infinite; }
 
 @media (max-width: 700px) {
@@ -452,4 +636,6 @@ html, body {
   #ammo { font-size: 30px; }
   .hud-corner { padding: 12px; }
   #minimap { display: none; }
+  #objective { top: 70px; left: 12px; font-size: 10px; }
+  #radio { bottom: 90px; font-size: 12px; }
 }

@@ -48,6 +48,15 @@ export class Rng {
   chance(p: number): boolean {
     return this.next() < p;
   }
+
+  /** Shuffles a list in place and returns it. */
+  shuffle<T>(arr: T[]): T[] {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = this.int(i + 1);
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
 }
 
 /** Shared instance for cosmetic, non-gameplay randomness. */

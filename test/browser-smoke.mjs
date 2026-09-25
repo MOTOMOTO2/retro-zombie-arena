@@ -204,17 +204,22 @@ try {
     out.perkBought = game.player.perks.has('juggernog');
     out.juggernogRaisesHealth = game.player.maxHealth > hpBefore;
 
-    const packedBefore = game.player.slot.packed;
+    const tierBefore = game.player.slot.tier;
     game.packWeapon();
-    out.packUpgrades = !packedBefore && game.player.slot.packed;
+    out.packUpgrades = tierBefore === 0 && game.player.slot.tier === 1;
+    // And again: tier II brings an ammo mod.
+    game.packWeapon();
+    out.packGoesDeeper = game.player.slot.tier === 2 && game.player.slot.mod !== null;
 
     // Mystery box: roll it and take whatever comes out.
     const slotsBefore = game.player.slots.length;
-    game.rollBox();
+    const unit = game.boxes.units[0];
+    game.rollBox(unit);
     for (let i = 0; i < 60 * 5; i++) game.update(1 / 60);
-    out.boxOffered = Boolean(game.boxOffer);
-    if (game.boxOffer) {
-      game.takeBoxWeapon();
+    out.boxOffered = Boolean(unit.offer);
+    out.boxNeverOffersWhatYouHave = !game.player.slots.some((s) => s.id === unit.offer);
+    if (unit.offer) {
+      game.takeBoxWeapon(unit);
       out.boxGaveWeapon = game.player.slots.length > slotsBefore || slotsBefore === 2;
     }
 
@@ -245,7 +250,7 @@ try {
     const home = game.layout.zones.find((z) => z.id === game.layout.spawnZone);
     let lane = home.rect.z + 1;
     const clear = (row) => {
-      for (let x = home.rect.x; x < home.rect.x + 6; x++) if (game.layout.tiles[row * 56 + x] !== 1) return false;
+      for (let x = home.rect.x; x < home.rect.x + 6; x++) if (game.layout.tiles[row * Math.sqrt(game.layout.tiles.length) + x] !== 1) return false;
       return true;
     };
     while (!clear(lane)) lane++;
@@ -301,7 +306,7 @@ try {
     const L = game.layout;
     const room = L.zones.find((z) => z.id === L.spawnZone);
     let row = room.rect.z + 1;
-    while (L.tiles[row * 56 + room.rect.x - 1] !== 2) row++;
+    while (L.tiles[row * Math.sqrt(L.tiles.length) + room.rect.x - 1] !== 2) row++;
     game.player.x = (room.rect.x + 0.5) * 4;
     game.player.z = (row + 0.5) * 4;
     game.player.yaw = Math.PI / 2; // forward is (-sin, -cos): straight at the west wall
@@ -451,11 +456,13 @@ try {
     for (let n = 0; n < 12; n++) {
       const e = game.pool.acquire('walker');
       const t = floor[(n * 7919) % floor.length];
-      e.spawn('walker', ((t % 56) + 0.5) * 4, (Math.floor(t / 56) + 0.5) * 4, 1e6, 1, null, game.rng);
+      const W = Math.sqrt(L.tiles.length);
+      e.spawn('walker', ((t % W) + 0.5) * 4, (Math.floor(t / W) + 0.5) * 4, 1e6, 1, null, game.rng);
       e.state = 'hunt';
       bodies.push({ e, reached: false });
     }
-    for (let f = 0; f < 60 * 75; f++) {
+    // The maps are big now: the far corner can be a hundred tiles of path away.
+    for (let f = 0; f < 60 * 120; f++) {
       game.player.health = game.player.maxHealth;
       for (const b of bodies) b.e.lostTime = 0;
       game.update(1 / 60);
@@ -504,11 +511,16 @@ try {
     const info = game.retro.renderer.info;
     const seeds = [];
     const shapes = new Set();
-    let geoAfter2 = 0;
     for (let i = 0; i < 6; i++) {
       game.newRun();
       seeds.push(game.seed);
       shapes.add(Array.from(game.layout.tiles).join(''));
+    }
+    // Leaks: rebuild the same layout over and over; the count must not climb.
+    // (Different layouts put different props in view, so only identical ones compare.)
+    let geoAfter2 = 0;
+    for (let i = 0; i < 6; i++) {
+      game.newRun(5151);
       for (let k = 0; k < 5; k++) game.update(1 / 60);
       game.render();
       if (i === 1) geoAfter2 = info.memory.geometries;
@@ -528,7 +540,7 @@ try {
   check('every run gets a different asylum', maps.distinct === 6, `seeds ${maps.seeds.join(', ')}`);
   check('a seed replays the same asylum', maps.replay);
   check('the player wakes up inside the start room', maps.inStartRoom, maps.nameA);
-  check('rebuilding the world does not leak GPU memory', maps.geoAfter6 - maps.geoAfter2 < 60,
+  check('rebuilding the world does not leak GPU memory', maps.geoAfter6 - maps.geoAfter2 < 12,
     `geometries ${maps.geoAfter2} -> ${maps.geoAfter6}`);
 
   // ------------------------------------------------------ weapons in hand
@@ -539,14 +551,14 @@ try {
     game.pool.reset();
     game.roundPhase = 'clear';
     game.phaseTimer = 999;
-    const ids = ['sidearm', 'boomstick', 'trench', 'grease', 'nailrifle', 'longshot', 'scattergun', 'ripper', 'plasma', 'hellfire', 'thunder'];
+    const ids = ['sidearm', 'boomstick', 'trench', 'grease', 'nailrifle', 'longshot', 'scattergun', 'ripper', 'plasma', 'hellfire', 'thunder', 'stormcaller', 'wintershowl', 'dragonfire'];
     const events = [];
     const vm = game.viewmodel;
     const prev = vm.onEvent;
     vm.onEvent = (e) => { events.push(e); prev(e); };
     const bad = [];
     for (const id of ids) {
-      game.player.slots = [{ id, mag: 0, reserve: 400, packed: false }];
+      game.player.slots = [{ id, mag: 0, reserve: 400, tier: 0, mod: null }];
       game.player.activeSlot = 0;
       game.equipCurrent();
       for (let i = 0; i < 30; i++) game.update(1 / 60);
@@ -559,7 +571,7 @@ try {
       if (events.length === before) bad.push(`${id}: silent reload`);
     }
     // The scoped rifle hides the gun and shows the scope when aimed.
-    game.player.slots = [{ id: 'longshot', mag: 5, reserve: 40, packed: false }];
+    game.player.slots = [{ id: 'longshot', mag: 5, reserve: 40, tier: 0, mod: null }];
     game.equipCurrent();
     game.input.aim = true;
     for (let i = 0; i < 60; i++) game.update(1 / 60);
@@ -568,7 +580,7 @@ try {
     for (let i = 0; i < 30; i++) game.update(1 / 60);
     const unscoped = !vm.scopeView && !document.getElementById('scope').classList.contains('show');
     // Pack-a-Punch camo builds and renders.
-    game.player.slot.packed = true;
+    game.player.slot.tier = 3;
     game.equipCurrent();
     game.render();
     vm.onEvent = prev;
@@ -593,6 +605,178 @@ try {
   });
   check('zombies have voices', voices.active === 5, `${voices.active} sounding, context ${voices.state}`);
   check('a horde cannot drown the mix', voices.capped <= 7, `${voices.capped} voices after a flood`);
+
+  // ------------------------------------------------------------ four maps
+  const sweep = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    for (const id of ['asylum', 'town', 'foundry', 'labs']) {
+      const t0 = performance.now();
+      game.newRun(undefined, id);
+      const ms = performance.now() - t0;
+      game.input.locked = true;
+      for (let i = 0; i < 10; i++) game.update(1 / 60);
+      game.render();
+      let sky = false;
+      game.level.group.traverse((o) => { if (o.renderOrder === -1000) sky = true; });
+      out[id] = {
+        ms: Math.round(ms), map: game.mapId, parts: game.questProps.parts.length, sky,
+        boxes: game.boxes.units.filter((u) => u.enabled).length, state: game.state,
+        banner: document.getElementById('banner').textContent,
+      };
+    }
+    return out;
+  });
+  const wantBoxes = { asylum: 1, town: 2, foundry: 2, labs: 2 };
+  const wantSky = { asylum: false, town: true, foundry: true, labs: false };
+  for (const [id, r] of Object.entries(sweep)) {
+    check(`maps: ${id} builds and plays`, r.map === id && r.state === 'playing' && r.parts === 3, `${r.ms} ms, "${r.banner}"`);
+    check(`maps: ${id} runs ${wantBoxes[id]} mystery box(es)`, r.boxes === wantBoxes[id], `${r.boxes}`);
+    check(`maps: ${id} ${wantSky[id] ? 'has' : 'has no'} open sky`, r.sky === wantSky[id]);
+    check(`maps: ${id} builds in reasonable time`, r.ms < 8000, `${r.ms} ms under swiftshader`);
+  }
+
+  // ------------------------------------------------------ the story chain
+  const story = await page.evaluate(() => {
+    const { game, progress } = window.__RZA;
+    const shown = (id) => !document.getElementById(id).classList.contains('hidden');
+    const live = () => { game.player.health = game.player.maxHealth; };
+    const out = {};
+    game.newRun(4242, 'asylum');
+    game.input.locked = true;
+    game.player.award(1e6);
+    for (let i = 0; i < 10; i++) game.update(1 / 60);
+    out.objectivesListed = document.querySelectorAll('#objective-list li').length === 3;
+    out.waypointShows = shown('waypoint');
+    for (let i = 0; i < 60 * 4; i++) { live(); game.update(1 / 60); }
+    out.radioSpeaks = shown('radio') && document.getElementById('radio-text').textContent.length > 10;
+    out.workbenchWaits = !game.quest.canBuild;
+    game.turnOnPower();
+    out.powerCounts = game.quest.power === true;
+    game.takePart(0);
+    game.takePart(1);
+    out.partsCount = game.quest.partsFound === 2 && game.questProps.parts[0].taken;
+    game.takePart(2);
+    out.benchReady = game.quest.canBuild;
+    // Open the map so the boss has somewhere to come in.
+    for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+    game.pool.reset();
+    game.buildDevice();
+    out.deviceBuilt = game.quest.built && game.quest.boss === 'coming';
+    for (let i = 0; i < 60 * 20 && game.quest.boss === 'coming'; i++) { live(); game.update(1 / 60); }
+    const boss = game.pool.boss;
+    out.bossArrives = game.quest.boss === 'alive' && Boolean(boss && boss.active);
+    for (let i = 0; i < 5; i++) { live(); game.update(1 / 60); }
+    out.bossBarShows = shown('boss-bar') && document.getElementById('boss-name').textContent === 'THE WARDEN';
+    game.applyPowerUp('nuke', false);
+    out.nukeSparesTheBoss = boss.state !== 'dead';
+    out.cannotLeaveYet = (() => { game.tryEscape(); return game.state === 'playing'; })();
+    game.damageEnemy(boss, boss.health + 10, false, false, { x: boss.x, y: 3, z: boss.z });
+    out.bossDies = boss.state === 'dead' && game.quest.boss === 'dead';
+    out.exitOpens = game.questProps.exit.open;
+    for (let i = 0; i < 5; i++) { live(); game.update(1 / 60); }
+    out.bossBarGoes = !shown('boss-bar');
+    game.tryEscape();
+    out.victory = game.state === 'victory' && shown('victory');
+    out.endingShown = document.getElementById('win-story').textContent.length > 40;
+    out.nextChapterUnlocked = progress.unlocked.includes('town') && shown('btn-next');
+    // The boss body sinks away and leaves play on the next run.
+    game.newRun(undefined, 'asylum');
+    out.bossClearedOnNewRun = game.pool.boss === null;
+    return out;
+  });
+  for (const [k, v] of Object.entries(story)) check(`story: ${k}`, v === true);
+
+  // ------------------------------------------------------------- bosses
+  const fights = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    for (const [map, id] of [['asylum', 'warden'], ['town', 'butcher'], ['foundry', 'furnace'], ['labs', 'patient0']]) {
+      game.newRun(777, map);
+      game.input.locked = true;
+      game.player.award(1e6);
+      for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+      game.pool.reset();
+      game.roundPhase = 'clear';
+      game.phaseTimer = 1e9;
+      game.turnOnPower();
+      for (let i = 0; i < 3; i++) game.takePart(i);
+      game.buildDevice();
+      game.quest.bossTimer = 0;
+      game.update(1 / 60);
+      const boss = game.pool.boss;
+      const r = { spawned: Boolean(boss && boss.active && boss.id === id), moves: [], hurt: 0, health: boss ? boss.maxHealth : 0 };
+      if (!boss) { out[id] = r; continue; }
+      // Put it inside, in sight of the player, and let it fight.
+      let placed = false;
+      for (let a = 0; a < 16 && !placed; a++) {
+        const ang = (a / 16) * Math.PI * 2;
+        for (const dist of [18, 14, 10]) {
+          const x = game.player.x + Math.cos(ang) * dist;
+          const z = game.player.z + Math.sin(ang) * dist;
+          if (game.grid.lineOfSight(game.player.x, game.player.z, x, z) && game.grid.lineOfSight(x, z, x + 1.5, z) && game.grid.lineOfSight(x, z, x - 1.5, z)) {
+            boss.x = x;
+            boss.z = z;
+            placed = true;
+            break;
+          }
+        }
+      }
+      boss.target = null;
+      boss.state = 'hunt';
+      boss.y = 0;
+      const seen = new Set();
+      let taken = 0;
+      for (let f = 0; f < 60 * 30; f++) {
+        const before = game.player.health;
+        game.update(1 / 60);
+        if (game.player.health < before) taken += before - game.player.health;
+        game.player.health = game.player.maxHealth;
+        if (!game.player.alive) break;
+        if (boss.currentAction === 'windup' && boss.pending) seen.add(boss.pending);
+        if (boss.currentAction === 'summon') seen.add('summon');
+      }
+      r.moves = [...seen];
+      r.hurt = Math.round(taken);
+      r.placed = placed;
+      if (id === 'furnace') {
+        game.ignite(boss, 5);
+        r.fireproof = boss.burning === 0;
+      }
+      out[id] = r;
+    }
+    return out;
+  });
+  for (const [id, r] of Object.entries(fights)) {
+    check(`boss: ${id} arrives`, r.spawned, `${r.health} hp`);
+    check(`boss: ${id} uses its moves`, r.moves.length >= 1, r.moves.join(', ') || 'none');
+    check(`boss: ${id} hurts the player`, r.hurt > 0, `${r.hurt} damage in 30 s`);
+    if (id === 'furnace') check('boss: fire does not hurt the furnace man', r.fireproof === true);
+  }
+
+  // ------------------------------------------------------ chapter select
+  const select = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const shown = (id) => !document.getElementById(id).classList.contains('hidden');
+    game.abandon();
+    document.getElementById('btn-play').click();
+    const out = { mapsOpen: shown('menu-maps') && !shown('menu-main') };
+    const cards = [...document.querySelectorAll('#map-cards .card')];
+    out.fourChapters = cards.length === 4;
+    out.firstOpen = !cards[0].classList.contains('locked');
+    out.escapedMarked = cards[0].classList.contains('done');
+    out.secondOpenAfterEscape = !cards[1].classList.contains('locked');
+    out.lastLocked = cards[3].classList.contains('locked');
+    cards[3].click();
+    out.lockedStaysShut = shown('menu-maps') && !shown('menu-brief');
+    cards[1].click();
+    out.briefingOpens = shown('menu-brief') && document.getElementById('brief-title').textContent === 'OUTBREAK';
+    out.briefingListsSteps = document.querySelectorAll('#brief-steps li').length === 5;
+    document.getElementById('btn-brief-back').click();
+    out.backToChapters = shown('menu-maps');
+    return out;
+  });
+  for (const [k, v] of Object.entries(select)) check(`chapters: ${k}`, v === true);
 
   // --------------------------------------------------------- stability
   const perf = await page.evaluate(() => {

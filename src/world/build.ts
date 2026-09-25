@@ -29,10 +29,10 @@ import {
   type ZoneId,
   getZone,
   tileAt,
-  zoneAt,
 } from './mapdata.ts';
-import { looks, MOONLIGHT, type LampStyle, type LookId, type ThemeLook } from './themes.ts';
+import { lookIdAt, looks, MOONLIGHT, type LampStyle, type ThemeLook } from './themes.ts';
 import { textures } from '../gfx/textures.ts';
+import { buildSky } from './sky.ts';
 
 /** Window opening, in world units above the floor. */
 export const SILL = 1.1;
@@ -57,7 +57,8 @@ export type BuiltLevel = {
   dispose(): void;
 };
 
-export type Dresser = (b: Batcher, lighting: Lighting, rng: Rng) => void;
+/** Dresses the rooms. `taken` holds the tiles the level has already put something on. */
+export type Dresser = (b: Batcher, lighting: Lighting, rng: Rng, taken: Set<number>) => void;
 
 function isOpen(t: number): boolean {
   return t === T_FLOOR || t === T_DOOR;
@@ -68,9 +69,9 @@ function occludes(t: number): boolean {
   return t !== T_FLOOR && t !== T_DOOR;
 }
 
-function lookIdAt(layout: Layout, tx: number, tz: number): LookId {
-  const z = zoneAt(layout, tx, tz);
-  return z ? getZone(layout, z).theme : 'corridor';
+/** True when any part of the map is open to the sky. */
+export function hasSky(layout: Layout): boolean {
+  return Boolean(looks()[layout.corridorLook].outdoor) || layout.zones.some((z) => looks()[z.theme].outdoor);
 }
 
 function smoothstep(a: number, b: number, x: number): number {
@@ -216,13 +217,24 @@ function wallFace(
   if (look.dado > 0 && ranges.some(([r0, r1]) => r0 <= look.dado && r1 >= look.dado + RAIL)) {
     b.box(trim, amb, along ? len : 0.16, RAIL, along ? 0.16 : len, mx, look.dado + RAIL / 2, mz);
   }
+  // Out in the open a wall is the front of a building: a string course
+  // between the storeys and a cornice against the sky.
+  if (look.outdoor && ranges[ranges.length - 1][1] >= WALL_H) {
+    const cx = (p0[0] + p1[0]) / 2 + n[0] * 0.26;
+    const cz = (p0[1] + p1[1]) / 2 + n[2] * 0.26;
+    b.box(trim, amb, along ? len + 0.02 : 0.52, 0.5, along ? 0.52 : len + 0.02, cx, WALL_H - 0.25, cz);
+    b.box(trim, amb, along ? len + 0.02 : 0.3, 0.26, along ? 0.3 : len + 0.02, mx + n[0] * 0.09, WALL_H - 0.9, mz + n[2] * 0.09);
+  }
+  if (look.outdoor && ranges.some(([r0, r1]) => r0 <= 5.2 && r1 >= 5.5)) {
+    b.box(trim, amb, along ? len : 0.24, 0.3, along ? 0.24 : len, mx + n[0] * 0.06, 5.35, mz + n[2] * 0.06);
+  }
 }
 
 /* ------------------------------------------------------------ windows */
 
 function windowOpening(
   b: Batcher, layout: Layout, look: ThemeLook, amb: THREE.Color,
-  bx: number, bz: number, dx: number, dz: number, outside: Set<number>,
+  bx: number, bz: number, dx: number, dz: number, outside: Set<number>, sky: boolean,
 ): void {
   const map = layout.tiles;
   const reveal: MatSpec = { map: look.upper };
@@ -251,7 +263,7 @@ function windowOpening(
     const pz = lz ? (s > 0 ? z1 : z0) : z0;
     const qx = lx ? px : x1;
     const qz = lz ? pz : z1;
-    wallFace(b, { ...look, dado: 0, lower: null }, [px, pz], [qx, qz], n, [[SILL, HEAD]], amb, 0.85, 0.85);
+    wallFace(b, { ...look, dado: 0, lower: null, outdoor: false }, [px, pz], [qx, qz], n, [[SILL, HEAD]], amb, 0.85, 0.85);
   }
 
   // A timber sill ledge on the room side.
@@ -270,9 +282,15 @@ function windowOpening(
   const faceIn = (-(p1[1] - p0[1])) * -dx + (p1[0] - p0[0]) * -dz > 0;
   const qa = faceIn ? p0 : p1;
   const qb = faceIn ? p1 : p0;
-  b.unlitQuad(textures().nightSky,
-    [qa[0], -1, qa[1]], [qb[0], -1, qb[1]], [qb[0], WALL_H + 5, qb[1]], [qa[0], WALL_H + 5, qa[1]],
-    [0, 0, 1, 0, 1, 1, 0, 1], new THREE.Color(0.75, 0.78, 0.9));
+  // Nine floors down there is no sky, only the dark of a ventilation shaft.
+  // Under an open sky the backdrop stops below the rooftops, or it would
+  // show over them from the street; the sky dome covers what is above it.
+  const underground = layout.map === 'labs';
+  const top = sky ? WALL_H - 0.05 : WALL_H + 5;
+  b.unlitQuad(underground ? textures().ventShaft : textures().nightSky,
+    [qa[0], -1, qa[1]], [qb[0], -1, qb[1]], [qb[0], top, qb[1]], [qa[0], top, qa[1]],
+    underground ? [0, 0, 2, 0, 2, 3, 0, 3] : [0, 0, 1, 0, 1, 1, 0, 1],
+    underground ? new THREE.Color(0.32, 0.4, 0.42) : new THREE.Color(0.75, 0.78, 0.9));
 
   // A scrap of ground outside, so the dead have something to walk on.
   for (let step = 0; step <= 3; step++) {
@@ -286,6 +304,8 @@ function windowOpening(
   }
 }
 
+const SHAFT_LIGHT = new THREE.Color(0.1, 0.16, 0.16);
+
 /** Moonlit ground under every window, laid once even where two windows share it. */
 function outsideGround(b: Batcher, layout: Layout, outside: Set<number>): void {
   const windows = layout.barricades.map((w) => [(w.tx + 0.5) * TILE, (w.tz + 0.5) * TILE]);
@@ -295,49 +315,122 @@ function outsideGround(b: Batcher, layout: Layout, outside: Set<number>): void {
     return Math.max(0.15, 1 - best / 16);
   };
   const up = [0, 1, 0];
+  const underground = layout.map === 'labs';
+  const ground = underground ? textures().floorGrate : textures().ground;
+  const light = underground ? SHAFT_LIGHT : MOONLIGHT;
   for (const i of outside) {
     const gx0 = (i % MAP_W) * TILE;
     const gz0 = Math.floor(i / MAP_W) * TILE;
     const gx1 = gx0 + TILE;
     const gz1 = gz0 + TILE;
-    b.quad({ map: textures().ground }, [gx0, 0.02, gz1], [gx1, 0.02, gz1], [gx1, 0.02, gz0], [gx0, 0.02, gz0],
-      up, [gx0 / TILE, gz1 / TILE, gx1 / TILE, gz1 / TILE, gx1 / TILE, gz0 / TILE, gx0 / TILE, gz0 / TILE], MOONLIGHT,
+    b.quad({ map: ground }, [gx0, 0.02, gz1], [gx1, 0.02, gz1], [gx1, 0.02, gz0], [gx0, 0.02, gz0],
+      up, [gx0 / TILE, gz1 / TILE, gx1 / TILE, gz1 / TILE, gx1 / TILE, gz0 / TILE, gx0 / TILE, gz0 / TILE], light,
       [shadeAt(gx0, gz1), shadeAt(gx1, gz1), shadeAt(gx1, gz0), shadeAt(gx0, gz0)]);
   }
 }
 
 /* --------------------------------------------------------------- lamps */
 
-type Fixture = { x: number; z: number; style: LampStyle; color: THREE.Color; along: 'x' | 'z'; flicker: boolean };
+/**
+ * A lamp. For a street lamp (x, z) is the lantern and (nx, nz) the way its
+ * arm reaches out from the post; a free-standing lantern has no arm.
+ */
+type Fixture = {
+  x: number; z: number; style: LampStyle; color: THREE.Color; along: 'x' | 'z'; flicker: boolean;
+  nx: number; nz: number;
+};
 
 const STYLE = {
   fluorescent: { y: WALL_H - 0.35, radius: 19, gain: 1.8, glow: 3.2 },
   bulb: { y: WALL_H - 2.3, radius: 17, gain: 1.9, glow: 4.5 },
   cage: { y: WALL_H - 0.75, radius: 18, gain: 1.8, glow: 3.4 },
+  post: { y: 7.3, radius: 30, gain: 2.3, glow: 4.4 },
 } as const;
+
+/** How far a street lamp's arm reaches out from its post. */
+const ARM = 1.7;
 
 function placeLamps(layout: Layout, lighting: Lighting, rng: Rng): Fixture[] {
   const fixtures: Fixture[] = [];
   const pillar = new Set<number>();
   for (const zone of layout.zones) for (const p of zone.pillars) pillar.add(p.tz * MAP_W + p.tx);
 
-  const addLamp = (tx: number, tz: number, look: ThemeLook, along: 'x' | 'z'): void => {
+  const light = (x: number, z: number, look: ThemeLook, flicker: boolean): THREE.Color => {
     const s = STYLE[look.lampStyle];
-    const x = (tx + 0.5) * TILE;
-    const z = (tz + 0.5) * TILE;
-    const flicker = rng.chance(0.12);
     const color = new THREE.Color(look.light);
     lighting.add({
       x, y: s.y, z, color,
       intensity: look.lampIntensity * s.gain * rng.range(0.9, 1.1) * (flicker ? 0.75 : 1),
       radius: s.radius,
     });
-    fixtures.push({ x, z, style: look.lampStyle, color, along, flicker });
+    return color;
+  };
+
+  const addLamp = (tx: number, tz: number, look: ThemeLook, along: 'x' | 'z'): void => {
+    const x = (tx + 0.5) * TILE;
+    const z = (tz + 0.5) * TILE;
+    const flicker = rng.chance(0.12);
+    const color = light(x, z, look, flicker);
+    fixtures.push({ x, z, style: look.lampStyle, color, along, flicker, nx: 0, nz: 0 });
+  };
+
+  /** A street lamp on a floor tile with the wall behind it at -(nx, nz). */
+  const postAt = (tx: number, tz: number, nx: number, nz: number, look: ThemeLook): boolean => {
+    const i = tz * MAP_W + tx;
+    if (tileAt(layout.tiles, tx, tz) !== T_FLOOR || layout.reserved.has(i) || pillar.has(i)) return false;
+    if (tileAt(layout.tiles, tx - nx, tz - nz) !== T_WALL) return false;
+    const x = (tx + 0.5 - nx * 0.36) * TILE + nx * ARM;
+    const z = (tz + 0.5 - nz * 0.36) * TILE + nz * ARM;
+    const flicker = rng.chance(0.1);
+    const color = light(x, z, look, flicker);
+    fixtures.push({ x, z, style: 'post', color, along: 'x', flicker, nx, nz });
+    return true;
+  };
+
+  /** Posts every `spacing` tiles along a run of wall, nudged past anything in the way. */
+  const postRun = (
+    x0: number, z0: number, sx: number, sz: number, len: number, nx: number, nz: number,
+    look: ThemeLook, phase: number,
+  ): void => {
+    const spacing = look.lampSpacing;
+    for (let k = phase; k < len; k += spacing) {
+      for (let nudge = 0; nudge < 3 && k + nudge < len; nudge++) {
+        if (postAt(x0 + sx * (k + nudge), z0 + sz * (k + nudge), nx, nz, look)) break;
+      }
+    }
   };
 
   for (const zone of layout.zones) {
     const look = looks()[zone.theme];
     const r = zone.rect;
+    if (look.outdoor) {
+      // Street lamps down both long sides, staggered, plus lanterns standing
+      // free across the middle of a big square.
+      const half = Math.floor(look.lampSpacing / 2);
+      postRun(r.x, r.z, 1, 0, r.w, 0, 1, look, 1);
+      postRun(r.x, r.z + r.h - 1, 1, 0, r.w, 0, -1, look, 1 + half);
+      postRun(r.x, r.z, 0, 1, r.h, 1, 0, look, 1 + half);
+      postRun(r.x + r.w - 1, r.z, 0, 1, r.h, -1, 0, look, 1);
+      const inset = 5;
+      if (r.w > inset * 2 + 1 && r.h > inset * 2 + 1) {
+        const step = look.lampSpacing + 2;
+        const nx = Math.max(1, Math.round((r.w - inset * 2) / step));
+        const nz = Math.max(1, Math.round((r.h - inset * 2) / step));
+        for (let j = 0; j < nz; j++) {
+          for (let i = 0; i < nx; i++) {
+            const tx = r.x + inset + Math.floor(((i + 0.5) * (r.w - inset * 2)) / nx);
+            const tz = r.z + inset + Math.floor(((j + 0.5) * (r.h - inset * 2)) / nz);
+            const k = tz * MAP_W + tx;
+            if (layout.reserved.has(k) || pillar.has(k) || tileAt(layout.tiles, tx, tz) !== T_FLOOR) continue;
+            const x = (tx + 0.5) * TILE;
+            const z = (tz + 0.5) * TILE;
+            const color = light(x, z, look, false);
+            fixtures.push({ x, z, style: 'post', color, along: 'x', flicker: false, nx: 0, nz: 0 });
+          }
+        }
+      }
+      continue;
+    }
     const nx = Math.max(1, Math.round(r.w / look.lampSpacing));
     const nz = Math.max(1, Math.round(r.h / look.lampSpacing));
     for (let j = 0; j < nz; j++) {
@@ -350,10 +443,22 @@ function placeLamps(layout: Layout, lighting: Lighting, rng: Rng): Fixture[] {
     }
   }
 
-  const corridor = looks().corridor;
+  const corridor = looks()[layout.corridorLook];
   for (const c of layout.corridors) {
     const horizontal = c.w > c.h;
     const long = horizontal ? c.w : c.h;
+    if (corridor.outdoor) {
+      // An alley gets its lamps on the walls, alternating sides.
+      const half = Math.floor(corridor.lampSpacing / 2);
+      if (horizontal) {
+        postRun(c.x, c.z, 1, 0, c.w, 0, 1, corridor, 1);
+        postRun(c.x, c.z + c.h - 1, 1, 0, c.w, 0, -1, corridor, 1 + half);
+      } else {
+        postRun(c.x, c.z, 0, 1, c.h, 1, 0, corridor, 1);
+        postRun(c.x + c.w - 1, c.z, 0, 1, c.h, -1, 0, corridor, 1 + half);
+      }
+      continue;
+    }
     const steps = Math.max(1, Math.round(long / corridor.lampSpacing));
     for (let i = 0; i < steps; i++) {
       const t = (i + 0.5) / steps;
@@ -391,6 +496,26 @@ function buildFixtures(b: Batcher, lighting: Lighting, fixtures: Fixture[], grou
       b.cylinder(metal, amb, 0.22, 0.85, 0.55, 8, f.x, WALL_H - 2.05, f.z, 0, 0, 0, true);
       glowGeo = new THREE.OctahedronGeometry(0.22, 0);
       gy = STYLE.bulb.y;
+    } else if (f.style === 'post') {
+      // Cast-iron street lamp: plinth, fluted pole, swan-neck arm, lantern.
+      const iron: MatSpec = { color: 0x1e2024 };
+      const arm = f.nx !== 0 || f.nz !== 0;
+      const px = arm ? f.x - f.nx * ARM : f.x;
+      const pz = arm ? f.z - f.nz * ARM : f.z;
+      const top = s.y + (arm ? 0.75 : 0.2);
+      const pamb = lighting.ambientAt(px, pz);
+      b.cylinder(iron, pamb, 0.34, 0.44, 0.9, 8, px, 0.45, pz);
+      b.cylinder(iron, pamb, 0.14, 0.2, top, 6, px, top / 2, pz);
+      b.cylinder(iron, pamb, 0.2, 0.2, 0.18, 6, px, 2.4, pz);
+      if (arm) {
+        const len = ARM + 0.1;
+        b.box(iron, amb, f.nx ? len : 0.12, 0.12, f.nz ? len : 0.12, px + f.nx * len / 2, top - 0.06, pz + f.nz * len / 2);
+        b.box(iron, amb, 0.1, 0.5, 0.1, f.x, s.y + 0.45, f.z);
+      }
+      b.cylinder(iron, amb, 0.12, 0.62, 0.36, 6, f.x, s.y + 0.36, f.z);
+      b.cylinder(iron, amb, 0.3, 0.2, 0.1, 6, f.x, s.y - 0.34, f.z);
+      glowGeo = new THREE.CylinderGeometry(0.34, 0.24, 0.52, 6);
+      gy = s.y;
     } else {
       b.box(housing, amb, 1.0, 0.3, 1.0, f.x, WALL_H - 0.15, f.z);
       for (const [ox, oz] of [[-0.36, -0.36], [0.36, -0.36], [-0.36, 0.36], [0.36, 0.36]]) {
@@ -435,6 +560,7 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
 
   const fixtures = placeLamps(layout, lighting, rng);
   const outside = new Set<number>();
+  const sky = hasSky(layout);
 
   for (let tz = 0; tz < MAP_H; tz++) {
     for (let tx = 0; tx < MAP_W; tx++) {
@@ -458,15 +584,17 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
         }
       }
 
-      // Ceiling.
+      // Ceiling, unless this is open to the sky.
       const x1 = x0 + TILE;
       const z1 = z0 + TILE;
-      b.quad({ map: look.ceiling }, [x0, WALL_H, z0], [x1, WALL_H, z0], [x1, WALL_H, z1], [x0, WALL_H, z1], [0, -1, 0],
-        [x0 / TILE, z0 / TILE, x1 / TILE, z0 / TILE, x1 / TILE, z1 / TILE, x0 / TILE, z1 / TILE], amb,
-        [groundAO(map, x0, z0, 0.25), groundAO(map, x1, z0, 0.25), groundAO(map, x1, z1, 0.25), groundAO(map, x0, z1, 0.25)]);
+      if (!look.outdoor) {
+        b.quad({ map: look.ceiling }, [x0, WALL_H, z0], [x1, WALL_H, z0], [x1, WALL_H, z1], [x0, WALL_H, z1], [0, -1, 0],
+          [x0 / TILE, z0 / TILE, x1 / TILE, z0 / TILE, x1 / TILE, z1 / TILE, x0 / TILE, z1 / TILE], amb,
+          [groundAO(map, x0, z0, 0.25), groundAO(map, x1, z0, 0.25), groundAO(map, x1, z1, 0.25), groundAO(map, x0, z1, 0.25)]);
+      }
 
       // Drop ceilings are missing the odd panel, and some hang loose.
-      if (look.ceiling === textures().ceilAcoustic && rng.chance(0.07)) {
+      if (!look.outdoor && look.ceiling === textures().ceilAcoustic && rng.chance(0.07)) {
         const qx = x0 + rng.int(2) * h;
         const qz = z0 + rng.int(2) * h;
         const hole: MatSpec = { color: 0x060606 };
@@ -495,7 +623,7 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
 
         if (nt === T_BARRICADE) {
           wallFace(b, look, p0, p1, n, [[0, SILL], [HEAD, WALL_H]], amb, cornerA, cornerB);
-          windowOpening(b, layout, look, amb, tx + dx, tz + dz, dx, dz, outside);
+          windowOpening(b, layout, look, amb, tx + dx, tz + dz, dx, dz, outside, sky);
         } else if (nt === T_WALL || nt === 0) {
           wallFace(b, look, p0, p1, n, [[0, WALL_H]], amb, cornerA, cornerB);
         }
@@ -521,7 +649,13 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
 
   outsideGround(b, layout, outside);
   const flickers = buildFixtures(b, lighting, fixtures, group);
-  dress?.(b, lighting, rng);
+  if (sky) group.add(buildSky(layout.seed));
+  const taken = new Set<number>();
+  for (const f of fixtures) {
+    if (f.style !== 'post') continue;
+    taken.add(Math.floor((f.z - f.nz * ARM) / TILE) * MAP_W + Math.floor((f.x - f.nx * ARM) / TILE));
+  }
+  dress?.(b, lighting, rng, taken);
 
   const baked = b.build(lighting);
   group.add(baked);
@@ -550,7 +684,11 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
         if (!mesh.isMesh) return;
         mesh.geometry.dispose();
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (const m of mats) m.dispose();
+        for (const m of mats) {
+          // Most textures are shared by every level; the sky paints its own.
+          if (m.userData.ownsMap) (m as THREE.MeshBasicMaterial).map?.dispose();
+          m.dispose();
+        }
       });
     },
   };
@@ -558,6 +696,10 @@ export function buildLevel(layout: Layout, dress?: Dresser): BuiltLevel {
 
 /** Fog colour for whichever room a tile is in. */
 export function fogColorAt(layout: Layout, zone: ZoneId | null): THREE.Color {
-  const look = looks()[zone ? getZone(layout, zone).theme : 'corridor'];
-  return new THREE.Color(look.fog);
+  return new THREE.Color(lookAt(layout, zone).fog);
+}
+
+/** The look of a room, or of the passages when not in one. */
+export function lookAt(layout: Layout, zone: ZoneId | null): ThemeLook {
+  return looks()[zone ? getZone(layout, zone).theme : layout.corridorLook];
 }

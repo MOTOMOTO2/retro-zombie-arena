@@ -250,8 +250,4 @@ export const BOX_MOVE_MAX = 9;
 
 /* ----------------------------------------------------------- pack-a-punch */
 
-export const PACK_COST = 5000;
-
-export function packedName(name: string): string {
-  return `${name}+`;
-}
+// Pack-a-Punch tiers, costs and names live with the weapon table in weapons.ts.

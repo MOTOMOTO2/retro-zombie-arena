@@ -16,6 +16,9 @@
  *   HELLFIRE M9       M9A1 bazooka
  *   PLASMA LANCE      a 1950s ray gun
  *   THUNDERCLAP       a brass-and-coil air cannon
+ *   STORMCALLER       a Tesla rifle: copper coils, an emitter dish, a bulb
+ *   WINTER'S HOWL     a chrome frost cannon with a coolant tank
+ *   DRAGONFIRE        an M2-style flamethrower wand with its fuel tank
  *   TRENCH KNIFE      US M1918 Mk I, knuckle-duster grip
  *   FRAG GRENADE      Mk 2 "pineapple"
  *
@@ -96,6 +99,9 @@ type Kit = {
   glowGreen: THREE.Material;
   glowBlue: THREE.Material;
   glowRed: THREE.Material;
+  glowIce: THREE.Material;
+  frost: THREE.Material;
+  glowOrange: THREE.Material;
   glass: THREE.Material;
 };
 
@@ -110,10 +116,14 @@ function tex(t: THREE.Texture, repeat: number): THREE.Texture {
   return c;
 }
 
-function makeKit(mode: KitMode, packed: boolean): Kit {
+/** Camo and glow for each Pack-a-Punch tier: violet, hellfire, aether gold. */
+const TIER_GLOW = [0x000000, 0x3a1a6a, 0x6a1a08, 0x5a4a10];
+
+function makeKit(mode: KitMode, tier: number): Kit {
   const t = textures();
   const metalMap = tex(t.gunMetal, 12);
-  const camo = packed ? tex(t.camo, 6) : null;
+  const camoTex = [null, t.camo, t.camo2, t.camo3][Math.min(3, Math.max(0, tier))];
+  const camo = camoTex ? tex(camoTex, 6) : null;
   const view = mode === 'view';
 
   const std = (color: number, metal: number, rough: number, map: THREE.Texture | null = null, envI = 0.9): THREE.Material => {
@@ -133,7 +143,7 @@ function makeKit(mode: KitMode, packed: boolean): Kit {
     if (camo) {
       const mat = std(0xffffff, 0.6, 0.35, camo);
       if (mat instanceof THREE.MeshStandardMaterial) {
-        mat.emissive = new THREE.Color(0x3a1a6a);
+        mat.emissive = new THREE.Color(TIER_GLOW[tier]);
         mat.emissiveMap = camo;
         mat.emissiveIntensity = 0.9;
       }
@@ -160,15 +170,18 @@ function makeKit(mode: KitMode, packed: boolean): Kit {
     glowGreen: glow(0.5, 3.2, 1.4),
     glowBlue: glow(0.6, 1.8, 4.2),
     glowRed: glow(3.6, 0.5, 0.3),
+    glowIce: glow(1.4, 3.0, 4.4),
+    frost: camo ? metal(0xffffff, 0.6, 0.35) : std(0xc8e4ee, 0.55, 0.42, metalMap),
+    glowOrange: glow(4.4, 1.9, 0.4),
     glass: glow(0.25, 0.55, 0.45),
   };
 }
 
-function kitFor(mode: KitMode, packed: boolean): Kit {
-  const key = `${mode}|${packed}`;
+function kitFor(mode: KitMode, tier: number): Kit {
+  const key = `${mode}|${tier}`;
   let k = kits.get(key);
   if (!k) {
-    k = makeKit(mode, packed);
+    k = makeKit(mode, tier);
     kits.set(key, k);
   }
   return k;
@@ -974,6 +987,144 @@ function mk2(b: Builder): GunRig {
   return rig;
 }
 
+/** Tesla rifle: a brass drum, copper coils round a live core, an emitter dish. */
+function stormcaller(b: Builder): GunRig {
+  const k = b.k;
+  const rig = baseRig('stormcaller', b);
+  const r = b.root;
+
+  b.cyl(r, 0.032, 0.2, -0.08, 0.03, 0, k.brass, 16);
+  b.cyl(r, 0.035, 0.012, -0.086, 0.03, 0, k.copper, 16);
+  b.cyl(r, 0.035, 0.012, 0.11, 0.03, 0, k.copper, 16);
+  b.cyl(r, 0.011, 0.28, 0.12, 0.03, 0, k.glowBlue, 10);
+  for (let i = 0; i < 8; i++) b.ring(r, 0.024, 0.005, 0.14 + i * 0.03, 0.03, 0, k.copper);
+  for (const x of [-0.03, 0.03]) b.cyl(r, 0.004, 0.27, 0.12, 0.058, x, k.black, 6);
+  // Emitter dish and prongs.
+  b.cyl(r, 0.012, 0.035, 0.4, 0.03, 0, k.brass, 14, 0.052);
+  for (const [x, v] of [[0.032, 0.062], [-0.032, 0.062], [0, -0.004]]) b.cyl(r, 0.003, 0.05, 0.43, v, x, k.bright, 5);
+  // Sights: a notch on the drum, a post on the dish.
+  b.box(r, 0.016, 0.04, 0.02, -0.05, 0.075, 0, k.brass);
+  b.box(r, 0.006, 0.02, 0.012, -0.05, 0.104, -0.006, k.brass);
+  b.box(r, 0.006, 0.02, 0.012, -0.05, 0.104, 0.006, k.brass);
+  b.box(r, 0.004, 0.07, 0.004, 0.41, 0.075, 0, k.brass);
+  // Walnut stock, grip, forward handle.
+  b.profile(r, [[-0.08, 0.05], [-0.08, 0.0], [-0.11, -0.03], [-0.36, -0.07], [-0.37, -0.064], [-0.37, 0.03], [-0.35, 0.035], [-0.11, 0.042]], 0.034, k.wood);
+  b.profile(r, [[-0.01, 0.0], [-0.035, -0.1], [-0.073, -0.1], [-0.055, 0.0]], 0.03, k.wood);
+  b.guard(r, 0.0, 0.055, 0.0, 0.03, 0.01, k.brass);
+  b.profile(r, [[0.2, 0.004], [0.245, 0.004], [0.24, -0.1], [0.205, -0.1]], 0.03, k.wood);
+  // The capacitor bulb rides on the left flank: this is the magazine.
+  b.box(r, 0.01, 0.03, 0.08, 0.02, 0.03, -0.035, k.brass);
+  const cell = b.group(r, 0.02, 0.034, -0.06);
+  b.sphere(cell, 0.026, 0, 0, 0, k.glowBlue);
+  b.cyl(cell, 0.014, 0.02, -0.045, 0, 0, k.brass, 10);
+  b.cyl(cell, 0.014, 0.02, 0.025, 0, 0, k.brass, 10);
+  rig.mag = cell;
+  rig.magAxis.set(1, 0, 0);
+  rig.magTravel = 0.07;
+  rig.magGrab = b.anchor(cell, 0, -0.014, -0.016, 0, 0, -0.4);
+
+  rig.muzzle = b.anchor(r, 0.45, 0.03, 0);
+  rig.rightHand = b.anchor(r, -0.042, -0.05, 0, -0.26, 0, 0);
+  rig.leftHand = b.anchor(r, 0.222, -0.052, 0, -0.05, 0, 0);
+  rig.reload = 'cell';
+  rig.casing = null;
+  rig.sightRear = P(-0.05, 0.108);
+  rig.sightFront = P(0.41, 0.108);
+  rig.eye = 0.24;
+  rig.hip.set(0.15, -0.17, -0.38);
+  return rig;
+}
+
+/** Frost cannon: chrome body, cooling fins, a flared mouth and a coolant tank. */
+function frostCannon(b: Builder): GunRig {
+  const k = b.k;
+  const rig = baseRig('wintershowl', b);
+  const r = b.root;
+
+  b.cyl(r, 0.03, 0.25, -0.09, 0.03, 0, k.frost, 16);
+  b.cyl(r, 0.022, 0.03, -0.12, 0.03, 0, k.bright, 12);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const fin = b.box(r, 0.004, 0.028, 0.11, 0.1, 0.03 + Math.sin(a) * 0.036, Math.cos(a) * 0.036, k.bright);
+    fin.rotation.z = a + Math.PI / 2;
+  }
+  b.cyl(r, 0.026, 0.08, 0.16, 0.03, 0, k.frost, 16, 0.05);
+  b.ring(r, 0.047, 0.005, 0.24, 0.03, 0, k.glowIce);
+  b.cyl(r, 0.04, 0.002, 0.2385, 0.03, 0, k.glowIce, 16);
+  // Frosted sight rail.
+  b.box(r, 0.012, 0.03, 0.24, 0.04, 0.072, 0, k.bright);
+  b.ring(r, 0.009, 0.0025, -0.06, 0.1, 0, k.bright);
+  b.box(r, 0.003, 0.03, 0.003, 0.15, 0.1, 0, k.glowIce);
+  b.profile(r, [[-0.01, 0.0], [-0.035, -0.1], [-0.073, -0.1], [-0.055, 0.0]], 0.03, k.black);
+  b.guard(r, 0.0, 0.05, 0.0, 0.028, 0.01, k.bright);
+  // Coolant tank under the body: the magazine.
+  const tank = b.group(r, 0.07, -0.035, 0);
+  b.cyl(tank, 0.025, 0.14, -0.07, 0, 0, k.glowIce, 12);
+  b.cyl(tank, 0.028, 0.012, -0.077, 0, 0, k.bright, 12);
+  b.cyl(tank, 0.028, 0.012, 0.065, 0, 0, k.bright, 12);
+  rig.mag = tank;
+  rig.magAxis.set(0, 1, 0);
+  rig.magTravel = 0.09;
+  rig.magGrab = b.anchor(tank, 0, -0.028, -0.01, 0, 0, 0);
+
+  rig.muzzle = b.anchor(r, 0.25, 0.03, 0);
+  rig.rightHand = b.anchor(r, -0.044, -0.05, 0, -0.26, 0, 0);
+  rig.leftHand = b.anchor(r, 0.07, -0.078, 0, 0, 0, 0);
+  rig.reload = 'cell';
+  rig.casing = null;
+  rig.sightRear = P(-0.06, 0.1);
+  rig.sightFront = P(0.15, 0.106);
+  rig.eye = 0.26;
+  rig.hip.set(0.15, -0.16, -0.4);
+  return rig;
+}
+
+/** Flamethrower wand after the M2: long barrel, heat shield, pilot light, fuel tank. */
+function flamethrower(b: Builder): GunRig {
+  const k = b.k;
+  const rig = baseRig('dragonfire', b);
+  const r = b.root;
+
+  b.box(r, 0.042, 0.05, 0.11, -0.02, 0.02, 0, k.olive);
+  b.cylX(r, 0.022, 0.012, 0.02, 0.02, 0.034, k.brass, 10);
+  b.cyl(r, 0.016, 0.52, 0.04, 0.035, 0, k.blued, 10);
+  b.cyl(r, 0.023, 0.18, 0.3, 0.035, 0, k.perf, 12);
+  b.cyl(r, 0.018, 0.045, 0.56, 0.035, 0, k.blued, 10, 0.011);
+  b.cyl(r, 0.009, 0.002, 0.604, 0.035, 0, k.bore, 8);
+  // Pilot light under the nozzle, always burning.
+  b.box(r, 0.006, 0.02, 0.03, 0.58, 0.016, 0, k.bright);
+  b.sphere(r, 0.009, 0.595, 0.008, 0, k.glowOrange);
+  // Grips: pistol grip at the valve, a vertical handle forward.
+  b.profile(r, [[-0.012, 0.0], [-0.036, -0.1], [-0.074, -0.1], [-0.056, 0.0]], 0.03, k.wood);
+  b.guard(r, 0.0, 0.05, 0.0, 0.028, 0.01, k.olive);
+  b.profile(r, [[0.3, 0.02], [0.345, 0.02], [0.34, -0.09], [0.305, -0.09]], 0.03, k.wood);
+  b.box(r, 0.02, 0.03, 0.04, 0.322, 0.025, 0, k.olive);
+  // Fuel tank slung under the barrel: the magazine.
+  const tank = b.group(r, 0.15, -0.03, 0);
+  b.cyl(tank, 0.036, 0.2, -0.1, 0, 0, k.olive, 14);
+  b.cyl(tank, 0.038, 0.014, -0.107, 0, 0, k.blued, 14);
+  b.cyl(tank, 0.038, 0.014, 0.093, 0, 0, k.blued, 14);
+  b.cylX(tank, 0.012, 0.006, 0, 0.0, -0.037, k.glowOrange, 10);
+  rig.mag = tank;
+  rig.magAxis.set(0, 1, 0);
+  rig.magTravel = 0.1;
+  rig.magGrab = b.anchor(tank, 0, -0.036, -0.012, 0, 0, 0);
+
+  rig.muzzle = b.anchor(r, 0.61, 0.035, 0);
+  rig.rightHand = b.anchor(r, -0.046, -0.05, 0, -0.26, 0, 0);
+  rig.leftHand = b.anchor(r, 0.322, -0.04, 0, -0.05, 0, 0);
+  rig.reload = 'mag';
+  rig.casing = null;
+  rig.sightRear = P(0.05, 0.068);
+  rig.sightFront = P(0.5, 0.068);
+  b.box(r, 0.004, 0.02, 0.004, 0.5, 0.058, 0, k.blued);
+  b.box(r, 0.012, 0.018, 0.008, 0.05, 0.056, 0, k.blued);
+  // Nobody sights down a flamethrower: aiming just brings it up and out.
+  rig.eye = 0.44;
+  rig.hip.set(0.15, -0.17, -0.36);
+  return rig;
+}
+
 const BUILDERS: Record<string, (b: Builder) => GunRig> = {
   sidearm: m1911,
   boomstick: coachGun,
@@ -986,6 +1137,9 @@ const BUILDERS: Record<string, (b: Builder) => GunRig> = {
   plasma: rayGun,
   hellfire: bazooka,
   thunder: thunderGun,
+  stormcaller,
+  wintershowl: frostCannon,
+  dragonfire: flamethrower,
   knife: trenchKnife,
   frag: mk2,
 };
@@ -993,10 +1147,11 @@ const BUILDERS: Record<string, (b: Builder) => GunRig> = {
 /** Weapon ids that have a model. Every entry in the weapon table must be here. */
 export const GUN_IDS = Object.keys(BUILDERS);
 
-export function buildGun(id: string, mode: KitMode = 'view', packed = false): GunRig {
+/** `tier` is the Pack-a-Punch tier, which picks the camo. */
+export function buildGun(id: string, mode: KitMode = 'view', tier = 0): GunRig {
   const make = BUILDERS[id];
   if (!make) throw new Error(`no model for weapon ${id}`);
-  const rig = make(new Builder(kitFor(mode, packed)));
+  const rig = make(new Builder(kitFor(mode, tier)));
   rig.root.updateMatrixWorld(true);
   finishMag(rig);
   if (rig.prop) rig.prop.visible = false;

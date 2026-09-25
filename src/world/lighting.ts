@@ -13,13 +13,20 @@ import {
   MAP_H,
   MAP_W,
   TILE,
+  T_DOOR,
+  T_FLOOR,
   T_WALL,
   type Layout,
   tileAt,
   zoneAt,
   getZone,
 } from './mapdata.ts';
-import { MOONLIGHT, looks } from './themes.ts';
+import { MOONLIGHT, lookIdAt, looks } from './themes.ts';
+
+/** Where the moon hangs (the sky dome paints it in the same place). */
+export const MOON_DIR = new THREE.Vector3(0.55, 0.62, -0.56).normalize();
+/** Moonlight on anything open to the sky. */
+const MOON_FILL = new THREE.Color(0.18, 0.22, 0.34);
 
 export type BakeLight = {
   x: number;
@@ -36,9 +43,19 @@ export class Lighting {
   /** Per tile: the lights whose radius could reach it. */
   private buckets: BakeLight[][] | null = null;
   private readonly ambientCache = new Map<string, THREE.Color>();
+  /** Per tile: 1 where it is open to the sky. */
+  private readonly skyTiles: Uint8Array;
 
   constructor(layout: Layout) {
     this.layout = layout;
+    this.skyTiles = new Uint8Array(MAP_W * MAP_H);
+    for (let tz = 0; tz < MAP_H; tz++) {
+      for (let tx = 0; tx < MAP_W; tx++) {
+        const t = tileAt(layout.tiles, tx, tz);
+        if (t !== T_FLOOR && t !== T_DOOR) continue;
+        if (looks()[lookIdAt(layout, tx, tz)].outdoor) this.skyTiles[tz * MAP_W + tx] = 1;
+      }
+    }
   }
 
   add(light: BakeLight): void {
@@ -115,7 +132,7 @@ export class Lighting {
       if (key === 'outside') {
         c = MOONLIGHT.clone();
       } else {
-        const look = looks()[zone ? getZone(this.layout, zone).theme : 'corridor'];
+        const look = looks()[zone ? getZone(this.layout, zone).theme : this.layout.corridorLook];
         c = new THREE.Color(look.ambient).multiplyScalar(look.ambientLevel);
       }
       this.ambientCache.set(key, c);
@@ -139,7 +156,18 @@ export class Lighting {
     const sx = px + nx * 0.05;
     const sz = pz + nz * 0.05;
     const direct = 0.55 + 0.45 * ao;
-    for (const L of this.bucket(Math.floor(sx / TILE), Math.floor(sz / TILE))) {
+    const stx = Math.floor(sx / TILE);
+    const stz = Math.floor(sz / TILE);
+    if (stx >= 0 && stz >= 0 && stx < MAP_W && stz < MAP_H && this.skyTiles[stz * MAP_W + stx]) {
+      // The moon: soft, cold and from one side, so walls facing it read
+      // lighter than the ones turned away.
+      const facing = directional ? 0.35 + 0.65 * Math.max(0, nx * MOON_DIR.x + ny * MOON_DIR.y + nz * MOON_DIR.z) : 0.7;
+      const m = facing * ao;
+      out.r += MOON_FILL.r * m;
+      out.g += MOON_FILL.g * m;
+      out.b += MOON_FILL.b * m;
+    }
+    for (const L of this.bucket(stx, stz)) {
       const dx = L.x - px;
       const dy = L.y - py;
       const dz = L.z - pz;

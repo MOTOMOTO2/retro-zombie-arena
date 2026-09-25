@@ -135,6 +135,33 @@ export type WeaponModel = {
  * level. Guns are modelled in metres and the world runs at two units a metre,
  * so scale 1 shows it a little larger than life, which is how wall buys read.
  */
+/**
+ * The teddy bear that comes out of the box instead of a gun when it is about
+ * to leave. About knee high, lit like the level.
+ */
+export function buildTeddy(): THREE.Group {
+  const g = new THREE.Group();
+  const fur = new THREE.MeshLambertMaterial({ color: 0x8a5a32 });
+  const pale = new THREE.MeshLambertMaterial({ color: 0xc89a6a });
+  const eye = new THREE.MeshBasicMaterial({ color: 0x0a0a0a });
+  const stitch = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 0.4, 0.3) });
+  box(g, 0.62, 0.7, 0.5, 0, 0, 0, fur);
+  box(g, 0.4, 0.4, 0.06, 0, -0.02, 0.26, pale);
+  box(g, 0.56, 0.5, 0.48, 0, 0.6, 0, fur);
+  box(g, 0.24, 0.16, 0.14, 0, 0.54, 0.28, pale);
+  box(g, 0.08, 0.06, 0.04, 0, 0.58, 0.36, eye);
+  for (const x of [-0.13, 0.13]) {
+    box(g, 0.08, 0.08, 0.04, x, 0.7, 0.25, eye);
+    box(g, 0.18, 0.18, 0.1, x * 1.6, 0.9, 0, fur);
+    box(g, 0.18, 0.4, 0.2, x * 3, 0.08, 0.06, fur).rotation.z = x > 0 ? -0.5 : 0.5;
+    box(g, 0.22, 0.3, 0.24, x * 1.4, -0.42, 0.08, fur);
+  }
+  // A stitched-up gash across the belly: it has been in there a while.
+  box(g, 0.3, 0.03, 0.02, 0, 0.05, 0.3, stitch).rotation.z = 0.3;
+  g.scale.setScalar(1.3);
+  return g;
+}
+
 export function buildWeaponModel(def: WeaponDef, scale = 1): WeaponModel {
   const rig = buildGun(def.id, 'world');
   const group = new THREE.Group();
@@ -182,6 +209,8 @@ export type ZombieLook = {
   wide: number;
   outfit: Outfit;
   cloth: number;
+  /** Bosses glow a different colour. */
+  eyes?: THREE.Material;
 };
 
 /** Shared by every zombie: the eyes are unlit and over-bright so they glow and bloom. */
@@ -270,7 +299,7 @@ export function buildZombie(look: ZombieLook): ZombieModel {
   box(head, 0.52 * w, 0.08 * s, 0.1, 0, 0.26 * s, 0.25 * w, skin);
   for (const side of [-1, 1]) {
     box(head, 0.14 * w, 0.1 * s, 0.04, side * 0.12 * w, 0.17 * s, 0.25 * w, dark);
-    box(head, 0.07 * w, 0.06 * s, 0.03, side * 0.12 * w, 0.17 * s, 0.27 * w, EYE_MAT);
+    box(head, 0.07 * w, 0.06 * s, 0.03, side * 0.12 * w, 0.17 * s, 0.27 * w, look.eyes ?? EYE_MAT);
   }
   box(head, 0.1 * w, 0.14 * s, 0.1, 0, 0.06 * s, 0.27 * w, skin);
   if (look.cloth % 3 === 0) box(head, 0.54 * w, 0.14 * s, 0.54 * w, 0, 0.42 * s, -0.02, dark);

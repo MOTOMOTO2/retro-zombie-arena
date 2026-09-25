@@ -13,8 +13,10 @@ import { chromium } from 'playwright';
 
 const ROOT = fileURLToPath(new URL('../dist', import.meta.url));
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
-const ALL = ['sidearm', 'boomstick', 'trench', 'grease', 'nailrifle', 'longshot', 'scattergun', 'ripper', 'plasma', 'hellfire', 'thunder'];
-const ids = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
+const ALL = ['sidearm', 'boomstick', 'trench', 'grease', 'nailrifle', 'longshot', 'scattergun', 'ripper', 'plasma', 'hellfire', 'thunder', 'stormcaller', 'wintershowl', 'dragonfire'];
+const args = process.argv.slice(2).filter((a) => !a.startsWith('--tier='));
+const TIER_ARG = Number((process.argv.find((a) => a.startsWith('--tier=')) ?? '--tier=0').slice(7));
+const ids = args.length ? args : ALL;
 
 const server = createServer(async (req, res) => {
   try {
@@ -42,7 +44,7 @@ await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
 await page.waitForFunction(() => Boolean(window.__RZA));
 
 for (const id of ids) {
-  const url = await page.evaluate(async (weapon) => {
+  const url = await page.evaluate(async ({ weapon, TIER }) => {
     const g = window.__RZA.game;
     g.newRun(4242);
     g.input.locked = true;
@@ -50,7 +52,7 @@ for (const id of ids) {
     g.pool.reset();
     g.roundPhase = 'clear';
     g.phaseTimer = 999;
-    g.player.slots = [{ id: weapon, mag: 0, reserve: 500, packed: false }];
+    g.player.slots = [{ id: weapon, mag: 0, reserve: 500, tier: TIER, mod: null }];
     g.player.activeSlot = 0;
     g.equipCurrent();
     // Face a lit wall of the start room.
@@ -107,8 +109,8 @@ for (const id of ids) {
     const sx = sheet.getContext('2d');
     tiles.forEach((c, i) => sx.drawImage(c, (i % 3) * 480, Math.floor(i / 3) * 300));
     return sheet.toDataURL('image/png');
-  }, id);
-  await writeFile(`tools/shots/guns/${id}.png`, Buffer.from(url.split(',')[1], 'base64'));
+  }, { weapon: id, TIER: TIER_ARG });
+  await writeFile(`tools/shots/guns/${id}${TIER_ARG ? `-tier${TIER_ARG}` : ''}.png`, Buffer.from(url.split(',')[1], 'base64'));
   console.log(`wrote tools/shots/guns/${id}.png`);
 }
 

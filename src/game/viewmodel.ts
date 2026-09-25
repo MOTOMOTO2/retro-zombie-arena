@@ -54,6 +54,16 @@ type Key = {
 
 const Z: G6 = [0, 0, 0, 0, 0, 0];
 
+/** Muzzle-flash tint for guns that do not burn powder. */
+const FLASH_COLORS: Record<string, number> = {
+  plasma: 0x60ffc0,
+  thunder: 0x80c8ff,
+  hellfire: 0xff9040,
+  stormcaller: 0x9ad8ff,
+  wintershowl: 0xbfeaff,
+  dragonfire: 0xff8a30,
+};
+
 /** View-space hand positions for spots that are not on the gun. */
 const VIEW_SPOTS: Partial<Record<Spot, { p: THREE.Vector3; r: THREE.Euler }>> = {
   pouch: { p: new THREE.Vector3(-0.2, -0.36, -0.2), r: new THREE.Euler(-1.1, 0.4, 0.3) },
@@ -461,11 +471,12 @@ export class ViewModel {
   }
 
   /** Swaps the visible gun instantly; call during the low point of a swap. */
-  equip(weaponId: string, packed = false): void {
-    const key = `${weaponId}|${packed}`;
+  /** `tier` is the Pack-a-Punch tier, which changes the camo. */
+  equip(weaponId: string, tier = 0): void {
+    const key = `${weaponId}|${tier}`;
     let rig = this.rigs.get(key);
     if (!rig) {
-      rig = buildGun(weaponId, 'view', packed);
+      rig = buildGun(weaponId, 'view', tier);
       this.rigs.set(key, rig);
     }
     if (this.current && this.current !== rig) this.pivot.remove(this.current.root);
@@ -476,7 +487,7 @@ export class ViewModel {
     rig.root.add(this.handL.group);
     rig.muzzle.add(this.flash);
     this.flashColor.set(
-      weaponId === 'plasma' ? 0x60ffc0 : weaponId === 'thunder' ? 0x80c8ff : weaponId === 'hellfire' ? 0xff9040 : 0xffc070,
+      FLASH_COLORS[weaponId] ?? 0xffc070,
     ).multiplyScalar(4);
     for (const m of this.flashMats) (m as THREE.MeshBasicMaterial).color.copy(this.flashColor);
     this.flashLight.color.copy(this.flashColor).multiplyScalar(0.25);

@@ -28,6 +28,9 @@ function el<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
+/** Tiles across the minimap. */
+const MINIMAP_SPAN = 54;
+
 export type MinimapBlip = { x: number; z: number; color: string; size?: number };
 
 export class Hud {
@@ -39,6 +42,7 @@ export class Hud {
   private readonly healthBar = el('health-bar');
   private readonly staminaBar = el('stamina-bar');
   private readonly weaponName = el('weapon-name');
+  private readonly weaponMod = el('weapon-mod');
   private readonly magEl = el('mag');
   private readonly reserveEl = el('reserve');
   private readonly ammoEl = el('ammo');
@@ -55,6 +59,16 @@ export class Hud {
   private readonly scopeEl = el('scope');
   private readonly minimap = el<HTMLCanvasElement>('minimap');
   private readonly mmCtx: CanvasRenderingContext2D;
+  private readonly objectiveEl = el('objective');
+  private readonly objectiveList = el('objective-list');
+  private readonly radioEl = el('radio');
+  private readonly radioWho = el('radio-who');
+  private readonly radioText = el('radio-text');
+  private readonly bossEl = el('boss-bar');
+  private readonly bossName = el('boss-name');
+  private readonly bossFill = el('boss-fill');
+  private readonly waypointEl = el('waypoint');
+  private readonly waypointDist = el('waypoint-dist');
 
   private deltaTimer = 0;
   private deltaValue = 0;
@@ -63,6 +77,11 @@ export class Hud {
   private hitTimer = 0;
   private ringTimer = 0;
   private shownPerks = '';
+  private shownObjectives = '';
+  private radioFull = '';
+  private radioShown = 0;
+  private radioTimer = 0;
+  private radioQueue: { who: string; text: string }[] = [];
 
   constructor() {
     const ctx = this.minimap.getContext('2d');
@@ -116,8 +135,13 @@ export class Hud {
     this.staminaBar.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
   }
 
-  setWeapon(name: string, mag: number, reserve: number, magSize: number): void {
+  setWeapon(
+    name: string, mag: number, reserve: number, magSize: number,
+    mod: { name: string; color: string } | null = null,
+  ): void {
     this.weaponName.textContent = name;
+    this.weaponMod.textContent = mod ? mod.name : '';
+    this.weaponMod.style.color = mod ? mod.color : '';
     this.magEl.textContent = String(mag);
     this.reserveEl.textContent = String(reserve);
     this.ammoEl.classList.toggle('low', mag <= Math.max(1, Math.ceil(magSize * 0.25)));
@@ -206,6 +230,70 @@ export class Hud {
     );
   }
 
+  /** The objective list; lines that are new since last time flash in. */
+  setObjectives(list: { text: string; done: boolean }[]): void {
+    const key = list.map((o) => `${o.text}|${o.done}`).join(';');
+    if (key === this.shownObjectives) return;
+    const before = new Set(this.shownObjectives.split(';'));
+    this.shownObjectives = key;
+    this.objectiveEl.classList.toggle('hidden', list.length === 0);
+    this.objectiveList.replaceChildren(
+      ...list.map((o) => {
+        const li = document.createElement('li');
+        li.textContent = o.text;
+        li.classList.toggle('done', o.done);
+        if (!before.has(`${o.text}|${o.done}`)) li.classList.add('new');
+        return li;
+      }),
+    );
+  }
+
+  /** A line of radio chatter. Lines that arrive while one is playing wait their turn. */
+  radio(who: string, text: string): void {
+    if (this.radioTimer > 0) {
+      this.radioQueue.push({ who, text });
+      return;
+    }
+    this.radioWho.textContent = who;
+    this.radioFull = text;
+    this.radioShown = 0;
+    this.radioText.textContent = '';
+    // Long enough to read: a beat plus a little per word.
+    this.radioTimer = 2.6 + text.split(' ').length * 0.28;
+    this.radioEl.classList.remove('hidden');
+  }
+
+  clearRadio(): void {
+    this.radioQueue.length = 0;
+    this.radioTimer = 0;
+    this.radioEl.classList.add('hidden');
+  }
+
+  /** The boss health bar, or null to hide it. */
+  setBoss(name: string | null, fraction = 1, enraged = false): void {
+    this.bossEl.classList.toggle('hidden', !name);
+    if (!name) return;
+    if (this.bossName.textContent !== name) this.bossName.textContent = name;
+    this.bossFill.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+    this.bossEl.classList.toggle('enraged', enraged);
+  }
+
+  /**
+   * The objective marker at a screen position in CSS pixels. `edge` pins it
+   * to the border of the screen when the target is behind or off to a side.
+   */
+  setWaypoint(x: number | null, y = 0, metres = 0, edge = false): void {
+    if (x === null) {
+      this.waypointEl.classList.add('hidden');
+      return;
+    }
+    this.waypointEl.classList.remove('hidden');
+    this.waypointEl.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    this.waypointEl.classList.toggle('edge', edge);
+    const label = `${Math.round(metres)}M`;
+    if (this.waypointDist.textContent !== label) this.waypointDist.textContent = label;
+  }
+
   toggleMap(on: boolean): void {
     this.minimap.classList.toggle('hidden', !on);
   }
@@ -214,20 +302,24 @@ export class Hud {
     return !this.minimap.classList.contains('hidden');
   }
 
-  /** Top-down view. Only rooms the player has opened are drawn. */
+  /** Top-down view of the area around the player, who stays in the middle. */
   drawMinimap(
     tiles: Uint8Array, px: number, pz: number, yaw: number, blips: MinimapBlip[],
   ): void {
     const ctx = this.mmCtx;
     const w = this.minimap.width;
     const h = this.minimap.height;
-    const scale = Math.min(w / MAP_W, h / MAP_H);
-    const ox = (w - MAP_W * scale) / 2;
-    const oy = (h - MAP_H * scale) / 2;
+    const scale = w / MINIMAP_SPAN;
+    const ox = w / 2 - (px / TILE) * scale;
+    const oy = h / 2 - (pz / TILE) * scale;
+    const tx0 = Math.max(0, Math.floor(-ox / scale));
+    const tz0 = Math.max(0, Math.floor(-oy / scale));
+    const tx1 = Math.min(MAP_W, Math.ceil((w - ox) / scale));
+    const tz1 = Math.min(MAP_H, Math.ceil((h - oy) / scale));
 
     ctx.clearRect(0, 0, w, h);
-    for (let tz = 0; tz < MAP_H; tz++) {
-      for (let tx = 0; tx < MAP_W; tx++) {
+    for (let tz = tz0; tz < tz1; tz++) {
+      for (let tx = tx0; tx < tx1; tx++) {
         const t = tiles[tz * MAP_W + tx];
         if (t === 0) continue;
         if (t === T_FLOOR) ctx.fillStyle = '#2f3a2c';
@@ -265,6 +357,19 @@ export class Hud {
   }
 
   update(dt: number): void {
+    if (this.radioTimer > 0) {
+      this.radioTimer -= dt;
+      // Type it out, about forty characters a second.
+      if (this.radioShown < this.radioFull.length) {
+        this.radioShown = Math.min(this.radioFull.length, this.radioShown + dt * 42);
+        this.radioText.textContent = this.radioFull.slice(0, Math.ceil(this.radioShown));
+      }
+      if (this.radioTimer <= 0) {
+        this.radioEl.classList.add('hidden');
+        const next = this.radioQueue.shift();
+        if (next) this.radio(next.who, next.text);
+      }
+    }
     if (this.deltaTimer > 0) {
       this.deltaTimer -= dt;
       if (this.deltaTimer <= 0) this.deltaEl.classList.remove('show');

@@ -47,6 +47,8 @@ export type HitResult = {
   killed: boolean;
   head: boolean;
   gibbed: boolean;
+  /** Killed while frozen: it burst into ice. */
+  shattered: boolean;
   /** A headshot kill took the head clean off. */
   headless: boolean;
   damageDealt: number;
@@ -78,51 +80,66 @@ export class Enemy {
   target: BarricadeProp | null = null;
   /** 1 on the frame a bullet lands, fading to 0; the renderer brightens the body with it. */
   hitFlash = 0;
+  /** Seconds left frozen solid: no moving, no swinging, and a kill shatters it. */
+  frozen = 0;
+  /** Seconds left on fire, and the damage per second the game applies for it. */
+  burning = 0;
+  burnDps = 0;
+  /** Seconds left twitching from electricity: stunned where it stands. */
+  shocked = 0;
+  /** Bosses get a health bar, a name and their own AI. */
+  get isBoss(): boolean {
+    return false;
+  }
+  /** Fire does nothing to it. */
+  get fireproof(): boolean {
+    return false;
+  }
   /** Whether it had the player in plain sight at its last think. */
   seesPlayer = false;
   deathKind: DeathKind = 'back';
 
-  private phase = 0;
-  private stateTimer = 0;
-  private attackCooldown = 0;
-  private swing = 0;
-  private groanTimer = 0;
-  private velX = 0;
-  private velZ = 0;
+  protected phase = 0;
+  protected stateTimer = 0;
+  protected attackCooldown = 0;
+  protected swing = 0;
+  protected groanTimer = 0;
+  protected velX = 0;
+  protected velZ = 0;
 
   // Pursuit.
-  private thinkTimer = 0;
-  private hasWaypoint = false;
-  private wpX = 0;
-  private wpZ = 0;
-  private lastX = 0;
-  private lastZ = 0;
-  private stuckTime = 0;
-  private lostTime = 0;
+  protected thinkTimer = 0;
+  protected hasWaypoint = false;
+  protected wpX = 0;
+  protected wpZ = 0;
+  protected lastX = 0;
+  protected lastZ = 0;
+  protected stuckTime = 0;
+  protected lostTime = 0;
   /** Path distance (in tiles) to the player at the last think, for measuring progress. */
-  private lastFieldDist = -1;
+  protected lastFieldDist = -1;
 
   // Hit reactions: springs for the body and head, plus a stagger and a shove.
-  private flinch = 0;
-  private flinchV = 0;
-  private roll = 0;
-  private rollV = 0;
-  private headSnap = 0;
-  private headSnapV = 0;
-  private stagger = 0;
-  private pushX = 0;
-  private pushZ = 0;
+  protected flinch = 0;
+  protected flinchV = 0;
+  protected roll = 0;
+  protected rollV = 0;
+  protected headSnap = 0;
+  protected headSnapV = 0;
+  protected stagger = 0;
+  protected pushX = 0;
+  protected pushZ = 0;
 
   // Death.
-  private deathT = 0;
-  private fallTime = 0.7;
-  private fallSide = 1;
-  private fallDir = 1;
-  private airVY = 0;
-  private spin = 0;
-  private spinAngle = 0;
-  private landAngle = 0;
-  private landed = false;
+  protected deathT = 0;
+  protected fallTime = 0.7;
+  protected fallSide = 1;
+  protected fallDir = 1;
+  protected airVY = 0;
+  protected spin = 0;
+  protected spinAngle = 0;
+  protected landAngle = 0;
+  protected landed = false;
 
   constructor(model: ZombieModel) {
     this.model = model;
@@ -154,6 +171,10 @@ export class Enemy {
     this.velX = 0;
     this.velZ = 0;
     this.hitFlash = 0;
+    this.frozen = 0;
+    this.burning = 0;
+    this.burnDps = 0;
+    this.shocked = 0;
     this.thinkTimer = rng.range(0, 0.1);
     this.hasWaypoint = false;
     this.seesPlayer = false;
@@ -209,7 +230,7 @@ export class Enemy {
    * the shooter toward this body), which decides which way it reels and falls.
    */
   applyDamage(amount: number, head: boolean, explosive: boolean, dirX = 0, dirZ = 0): HitResult {
-    if (this.state === 'dead') return { killed: false, head, gibbed: false, headless: false, damageDealt: 0 };
+    if (this.state === 'dead') return { killed: false, head, gibbed: false, shattered: false, headless: false, damageDealt: 0 };
     const before = this.health;
     this.health -= amount;
     this.hitFlash = 1;
@@ -231,12 +252,13 @@ export class Enemy {
       const shove = 1.2 + frac * 11;
       this.pushX += dirX * shove;
       this.pushZ += dirZ * shove;
-      return { killed: false, head, gibbed: false, headless: false, damageDealt: dealt };
+      return { killed: false, head, gibbed: false, shattered: false, headless: false, damageDealt: dealt };
     }
 
     // Down it goes.
     const overkill = amount / Math.max(1, this.maxHealth);
-    const gibbed = explosive ? overkill > 2.5 : overkill > 3.5;
+    const shattered = this.frozen > 0;
+    const gibbed = shattered || (explosive ? overkill > 2.5 : overkill > 3.5);
     const headless = !gibbed && head && this.kind !== 'hound';
     this.state = 'dead';
     this.deathT = 0;
@@ -271,7 +293,9 @@ export class Enemy {
     }
     this.fallTime = { back: 0.62, forward: 0.8, crumple: 0.95, launch: 0.6, gib: 0.05 }[this.deathKind];
     if (headless) this.model.head.visible = false;
-    return { killed: true, head, gibbed, headless, damageDealt: dealt };
+    this.frozen = 0;
+    this.shocked = 0;
+    return { killed: true, head, gibbed, shattered, headless, damageDealt: dealt };
   }
 
   /* --------------------------------------------------------------- update */
@@ -287,6 +311,28 @@ export class Enemy {
 
     if (this.state === 'dead') {
       this.updateDeath(dt, grid);
+      return;
+    }
+
+    if (this.burning > 0) this.burning = Math.max(0, this.burning - dt);
+    if (this.shocked > 0) {
+      // Locked up and twitching.
+      this.shocked = Math.max(0, this.shocked - dt);
+      const m = this.model;
+      const j = (a: number): number => (Math.random() - 0.5) * a;
+      m.body.rotation.set(0.1 + j(0.35), j(0.2), j(0.35));
+      m.head.rotation.set(j(0.6), j(0.5), j(0.5));
+      m.armL.rotation.x += j(0.8);
+      m.armR.rotation.x += j(0.8);
+      m.root.position.set(this.x + j(0.08), this.y, this.z + j(0.08));
+      m.root.updateMatrix();
+      return;
+    }
+    if (this.frozen > 0) {
+      // Frozen solid in whatever pose it was caught in.
+      this.frozen = Math.max(0, this.frozen - dt);
+      this.velX = 0;
+      this.velZ = 0;
       return;
     }
 
@@ -321,7 +367,7 @@ export class Enemy {
   }
 
   /** Walk from the outside spawn point into the window reveal. */
-  private updateApproach(dt: number): void {
+  protected updateApproach(dt: number): void {
     const b = this.target;
     if (!b) {
       this.state = 'hunt';
@@ -346,7 +392,7 @@ export class Enemy {
   }
 
   /** Rip the boards off, one every so often. */
-  private updateBreach(dt: number, onBoardBreak: (e: Enemy, b: BarricadeProp) => void): void {
+  protected updateBreach(dt: number, onBoardBreak: (e: Enemy, b: BarricadeProp) => void): void {
     const b = this.target;
     if (!b) {
       this.state = 'hunt';
@@ -367,7 +413,7 @@ export class Enemy {
   }
 
   /** Clamber through the window frame and drop inside. */
-  private updateClimb(dt: number): void {
+  protected updateClimb(dt: number): void {
     const b = this.target;
     if (!b) {
       this.state = 'hunt';
@@ -401,7 +447,7 @@ export class Enemy {
    * True when a body this wide can walk in a straight line between two
    * points: one ray down the middle and one along each shoulder.
    */
-  private clearPath(grid: NavGrid, x0: number, z0: number, x1: number, z1: number): boolean {
+  protected clearPath(grid: NavGrid, x0: number, z0: number, x1: number, z1: number): boolean {
     const dx = x1 - x0;
     const dz = z1 - z0;
     const d = Math.hypot(dx, dz);
@@ -415,7 +461,7 @@ export class Enemy {
   }
 
   /** Follows the flow field a few tiles ahead and keeps the farthest point it can walk straight to. */
-  private pickWaypoint(grid: NavGrid): void {
+  protected pickWaypoint(grid: NavGrid): void {
     const here = worldToTile(this.x, this.z);
     let flow = grid.flowAt(here.tx, here.tz);
     this.hasWaypoint = false;
@@ -451,7 +497,7 @@ export class Enemy {
   }
 
   /** A few times a second: can it see the player, where next, is it stuck, is it lost. */
-  private think(grid: NavGrid, px: number, pz: number, dist: number, interval: number): void {
+  protected think(grid: NavGrid, px: number, pz: number, dist: number, interval: number): void {
     const moved = Math.hypot(this.x - this.lastX, this.z - this.lastZ);
     this.lastX = this.x;
     this.lastZ = this.z;
@@ -497,7 +543,7 @@ export class Enemy {
     }
   }
 
-  private updateHunt(
+  protected updateHunt(
     dt: number, grid: NavGrid, px: number, pz: number, playerAlive: boolean,
     torn: Set<number>, onAttack: (e: Enemy, dmg: number) => void,
   ): void {
@@ -555,8 +601,9 @@ export class Enemy {
     const hx = hx0 / hd;
     const hz = hz0 / hd;
 
-    // Far behind and out of sight, the dead hurry to catch up.
-    const catchUp = !this.seesPlayer && dist > 22 ? Math.min(1.45, 1 + (dist - 22) / 40) : 1;
+    // Far behind and out of sight, the dead hurry to catch up - up to twice
+    // as fast across the far side of a big map, where nobody can see them do it.
+    const catchUp = !this.seesPlayer && dist > 22 ? Math.min(2, 1 + (dist - 22) / 32) : 1;
     const speed = this.speed * catchUp * (this.stagger > 0 ? 0.3 : 1);
     const turn = Math.min(1, dt * 9);
     this.velX += (hx * speed - this.velX) * turn;
@@ -574,7 +621,7 @@ export class Enemy {
 
   /* ---------------------------------------------------------------- death */
 
-  private updateDeath(dt: number, grid: NavGrid): void {
+  protected updateDeath(dt: number, grid: NavGrid): void {
     const m = this.model;
     this.deathT += dt;
     const t = this.deathT;
@@ -700,7 +747,7 @@ export class Enemy {
     m.root.updateMatrix();
   }
 
-  private faceTowards(dx: number, dz: number, rate: number): void {
+  protected faceTowards(dx: number, dz: number, rate: number): void {
     if (Math.abs(dx) < 1e-4 && Math.abs(dz) < 1e-4) return;
     const want = Math.atan2(dx, dz);
     let delta = want - this.yaw;
@@ -724,7 +771,7 @@ export class Enemy {
     other.z -= (dz / d) * push;
   }
 
-  private animate(dt: number, gait: number): void {
+  protected animate(dt: number, gait: number): void {
     const m = this.model;
     const moving = this.state === 'hunt' || this.state === 'approach';
 
@@ -794,6 +841,9 @@ export class EnemyPool {
   readonly all: Enemy[] = [];
   readonly group = new THREE.Group();
 
+  /** The boss in play, if any. It lives in `all` while it is here. */
+  boss: Enemy | null = null;
+
   // Bodies stay on the floor for a couple of seconds after dying, so the pool
   // holds comfortably more than the most that can be alive at once.
   constructor(humanoids = 40, hounds = 14) {
@@ -824,7 +874,7 @@ export class EnemyPool {
   acquire(kind: EnemyKind): Enemy | null {
     const wantHound = kind === 'hound';
     for (const e of this.all) {
-      if (e.active) continue;
+      if (e.active || e.isBoss) continue;
       const isHound = e.model.height < 2.2;
       if (isHound === wantHound) return e;
     }
@@ -859,11 +909,29 @@ export class EnemyPool {
     }
   }
 
-  /** The nuke: everything standing collapses where it stands. */
+  /** Brings a boss into play. */
+  addBoss(b: Enemy): void {
+    this.removeBoss();
+    this.boss = b;
+    this.all.push(b);
+    this.group.add(b.model.root);
+  }
+
+  /** Takes the boss out of play entirely. */
+  removeBoss(): void {
+    const b = this.boss;
+    if (!b) return;
+    b.retire();
+    this.all.splice(this.all.indexOf(b), 1);
+    this.group.remove(b.model.root);
+    this.boss = null;
+  }
+
+  /** The nuke: everything standing collapses where it stands. Bosses shrug it off. */
   killAll(): Enemy[] {
     const killed: Enemy[] = [];
     for (const e of this.all) {
-      if (e.active && e.state !== 'dead') {
+      if (e.active && e.state !== 'dead' && !e.isBoss) {
         e.applyDamage(e.health + 1, false, false, Math.random() - 0.5, Math.random() - 0.5);
         killed.push(e);
       }
@@ -872,6 +940,7 @@ export class EnemyPool {
   }
 
   reset(): void {
+    this.removeBoss();
     for (const e of this.all) e.retire();
   }
 }

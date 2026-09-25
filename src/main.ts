@@ -6,11 +6,14 @@ import './style.css';
 import { audio } from './core/audio.ts';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, type RetroQuality } from './core/retro.ts';
 import { Game, type GameState, type RunStats } from './game/game.ts';
+import { CHAPTERS, UNLOCK_ROUND } from './game/story.ts';
+import { isUnlocked, loadProgress, nextMap, previousMap, recordRun, saveProgress } from './game/progress.ts';
+import { MAPS, MAP_ORDER } from './world/maps.ts';
+import type { MapId } from './world/mapdata.ts';
 
 const SETTINGS_KEY = 'rza.settings.v2';
 /** v1 predates the colour-correct renderer; its quality pick is not carried over. */
 const LEGACY_SETTINGS_KEY = 'rza.settings.v1';
-const BEST_KEY = 'rza.best.v1';
 
 type Settings = {
   quality: keyof typeof QUALITY_PRESETS;
@@ -74,26 +77,6 @@ function saveSettings(s: Settings): void {
   }
 }
 
-type Best = { round: number; kills: number; points: number };
-
-function loadBest(): Best {
-  try {
-    const raw = localStorage.getItem(BEST_KEY);
-    if (raw) return JSON.parse(raw) as Best;
-  } catch {
-    /* ignore */
-  }
-  return { round: 0, kills: 0, points: 0 };
-}
-
-function saveBest(b: Best): void {
-  try {
-    localStorage.setItem(BEST_KEY, JSON.stringify(b));
-  } catch {
-    /* ignore */
-  }
-}
-
 function fmtTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -122,6 +105,7 @@ function boot(): void {
   const menu = el('menu');
   const pause = el('pause');
   const gameover = el('gameover');
+  const victory = el('victory');
   const bootScreen = el('boot');
   const clickToPlay = el('click-to-play');
 
@@ -130,6 +114,8 @@ function boot(): void {
   const panels = {
     main: el('menu-main'),
     howto: el('menu-howto'),
+    maps: el('menu-maps'),
+    brief: el('menu-brief'),
   };
 
   const showPanel = (name: keyof typeof panels): void => {
@@ -196,13 +182,95 @@ function boot(): void {
 
   /* --------------------------------------------------------------- state */
 
-  const best = loadBest();
+  const progress = loadProgress();
+  // The chapter to offer first: the furthest one unlocked that has not been escaped yet.
+  let selected: MapId = MAP_ORDER.find((m) => isUnlocked(progress, m) && !progress.records[m]?.escaped && m !== MAP_ORDER[0])
+    ?? MAP_ORDER.filter((m) => isUnlocked(progress, m)).pop()
+    ?? MAP_ORDER[0];
+
   const renderBest = (): void => {
-    el('best').textContent = best.round
-      ? `BEST: ROUND ${best.round}  ·  ${best.kills} KILLS  ·  ${best.points} PTS`
+    const escaped = MAP_ORDER.filter((m) => progress.records[m]?.escaped).length;
+    const bestRound = Math.max(0, ...MAP_ORDER.map((m) => progress.records[m]?.bestRound ?? 0));
+    el('best').textContent = bestRound
+      ? `CHAPTERS ESCAPED ${escaped}/${MAP_ORDER.length}  ·  BEST ROUND ${bestRound}`
       : 'NO RUNS RECORDED';
   };
   renderBest();
+
+  /* -------------------------------------------------------- chapter select */
+
+  const renderMapCards = (): void => {
+    const cards = MAP_ORDER.map((m) => {
+      const c = CHAPTERS[m];
+      const rec = progress.records[m];
+      const open = isUnlocked(progress, m);
+      const card = document.createElement('button');
+      card.className = 'card';
+      card.classList.toggle('locked', !open);
+      card.classList.toggle('done', Boolean(rec?.escaped));
+      const prev = previousMap(m);
+      const status = !open && prev
+        ? `LOCKED \u2014 ESCAPE ${MAPS[prev].name} OR REACH ROUND ${UNLOCK_ROUND} THERE`
+        : rec?.bestRound
+          ? `BEST ROUND ${rec.bestRound}${rec.escaped ? `  \u00b7  OUT BY ROUND ${rec.fastestEscape}` : ''}`
+          : 'NOT YET PLAYED';
+      card.innerHTML =
+        `<span class="num">CHAPTER ${c.number}</span>` +
+        `<span class="name">${MAPS[m].name}</span>` +
+        `<span class="ttl">${c.title}</span>` +
+        `<span class="blurb">${open ? c.blurb : '???'}</span>` +
+        `<span class="status">${status}</span>`;
+      card.addEventListener('click', () => {
+        if (!open) {
+          audio.deny();
+          return;
+        }
+        openBrief(m);
+      });
+      return card;
+    });
+    el('map-cards').replaceChildren(...cards);
+  };
+
+  const openMaps = (): void => {
+    renderMapCards();
+    showPanel('maps');
+    const first = el('map-cards').querySelector<HTMLButtonElement>('.card:not(.locked)');
+    first?.focus();
+  };
+
+  const openBrief = (m: MapId): void => {
+    selected = m;
+    const c = CHAPTERS[m];
+    el('brief-chapter').textContent = `CHAPTER ${c.number}  \u00b7  ${MAPS[m].name}`;
+    el('brief-title').textContent = c.title;
+    el('brief-text').innerHTML = c.briefing.map((para) => `<p>${para}</p>`).join('');
+    el('brief-steps').innerHTML = [
+      '<b>RESTORE THE POWER</b>',
+      `FIND THE <b>${c.parts.join('</b>, THE <b>')}</b>`,
+      `BUILD THE <b>${c.device}</b> AT THE WORKBENCH`,
+      `SURVIVE <span class="boss">${c.bossName}</span> &mdash; ${c.bossNote}`,
+      `ESCAPE THROUGH <b>${c.exit}</b>`,
+    ].map((li) => `<li>${li}</li>`).join('');
+    showPanel('brief');
+    el('btn-begin').focus();
+  };
+
+  /** Records a finished run, returning the note to show if it opened a new map. */
+  const record = (stats: RunStats): string | null => {
+    const res = recordRun(progress, stats.map, {
+      round: stats.round, kills: stats.kills, points: stats.points, escaped: stats.escaped,
+    });
+    saveProgress(progress);
+    renderBest();
+    return res.unlocked ? `NEW CHAPTER UNLOCKED: ${MAPS[res.unlocked].name}` : null;
+  };
+
+  const showUnlock = (id: string, note: string | null): void => {
+    const node = el(id);
+    node.classList.toggle('hidden', !note);
+    node.textContent = note ?? '';
+  };
 
   /* ------------------------------------------------------------ settings screen */
 
@@ -241,6 +309,7 @@ function boot(): void {
     menu.classList.toggle('hidden', s !== 'menu' || settingsFrom !== null);
     pause.classList.toggle('hidden', s !== 'paused' || settingsFrom !== null);
     gameover.classList.toggle('hidden', s !== 'gameover');
+    victory.classList.toggle('hidden', s !== 'victory');
     clickToPlay.classList.toggle('hidden', !(s === 'playing' && !game.input.locked));
     if (s === 'paused') {
       el('pause-stats').innerHTML = statsRows([
@@ -248,38 +317,57 @@ function boot(): void {
         ['KILLS', String(game.stats.kills)],
         ['POINTS', String(game.player.points)],
         ['LOCATION', game.currentZoneName],
+        ['OBJECTIVE', game.quest.objectives().find((o) => !o.done)?.text ?? '\u2014'],
       ]);
     }
   };
 
   game.onGameOver = (stats: RunStats) => {
-    const record =
-      stats.round > best.round ||
-      (stats.round === best.round && stats.points > best.points);
-    if (record) {
-      best.round = stats.round;
-      best.kills = stats.kills;
-      best.points = stats.points;
-      saveBest(best);
-      renderBest();
-    }
+    const before = progress.records[stats.map]?.bestRound ?? 0;
+    const note = record(stats);
+    const best = progress.records[stats.map]?.bestRound ?? stats.round;
     el('go-stats').innerHTML = statsRows([
+      ['CHAPTER', `${CHAPTERS[stats.map].number}: ${CHAPTERS[stats.map].title}`],
       ['SURVIVED TO ROUND', String(stats.round)],
       ['KILLS', String(stats.kills)],
       ['HEADSHOTS', String(stats.headshots)],
       ['POINTS EARNED', String(stats.points)],
       ['TIME', fmtTime(stats.seconds)],
-      ['BEST ROUND', String(best.round)],
-    ]) + (record ? '<div style="color:#ffc84d;margin-top:10px">NEW PERSONAL BEST</div>' : '');
+      ['BEST ROUND HERE', String(best)],
+    ]) + (stats.round > before ? '<div style="color:#ffc84d;margin-top:10px">NEW PERSONAL BEST</div>' : '');
+    showUnlock('go-unlock', note);
   };
 
-  const startRun = async (): Promise<void> => {
+  game.onVictory = (stats: RunStats) => {
+    const note = record(stats);
+    const c = CHAPTERS[stats.map];
+    const last = !nextMap(stats.map);
+    el('win-chapter').textContent = `CHAPTER ${c.number}: ${c.title}  \u00b7  COMPLETE`;
+    el('win-story').innerHTML = c.ending.map((para) => `<p>${para}</p>`).join('') +
+      (last ? '<p style="color:#ffc84d;letter-spacing:.3em;text-align:center">THE END &mdash; THANKS FOR PLAYING</p>' : '');
+    el('win-stats').innerHTML = statsRows([
+      ['ESCAPED ON ROUND', String(stats.round)],
+      ['KILLS', String(stats.kills)],
+      ['HEADSHOTS', String(stats.headshots)],
+      ['POINTS EARNED', String(stats.points)],
+      ['TIME', fmtTime(stats.seconds)],
+    ]);
+    showUnlock('win-unlock', note);
+    const next = nextMap(stats.map);
+    el('btn-next').classList.toggle('hidden', !next || !isUnlocked(progress, next));
+    if (next) selected = next;
+  };
+
+  const startRun = async (m: MapId = selected): Promise<void> => {
+    selected = m;
     await audio.resume();
-    game.newRun();
+    game.newRun(undefined, m);
     game.input.requestLock();
   };
 
-  el('btn-play').addEventListener('click', () => void startRun());
+  el('btn-play').addEventListener('click', () => openMaps());
+  el('btn-begin').addEventListener('click', () => void startRun(selected));
+  el('btn-brief-back').addEventListener('click', () => openMaps());
   el('btn-howto').addEventListener('click', () => showPanel('howto'));
   el('btn-settings').addEventListener('click', () => openSettings('menu'));
   el('btn-pause-settings').addEventListener('click', () => openSettings('pause'));
@@ -295,8 +383,26 @@ function boot(): void {
     game.abandon();
     showPanel('main');
   });
-  el('btn-again').addEventListener('click', () => void startRun());
+  el('btn-again').addEventListener('click', () => void startRun(game.mapId));
   el('btn-menu').addEventListener('click', () => {
+    game.abandon();
+    showPanel('main');
+  });
+  el('btn-go-maps').addEventListener('click', () => {
+    game.abandon();
+    openMaps();
+  });
+  el('btn-next').addEventListener('click', () => {
+    const next = nextMap(game.mapId);
+    if (!next) return;
+    game.abandon();
+    openBrief(next);
+  });
+  el('btn-win-maps').addEventListener('click', () => {
+    game.abandon();
+    openMaps();
+  });
+  el('btn-win-menu').addEventListener('click', () => {
     game.abandon();
     showPanel('main');
   });
@@ -355,7 +461,7 @@ function boot(): void {
   };
 
   // Debug handle. The headless smoke test drives the game through this.
-  (window as unknown as { __RZA: unknown }).__RZA = { game, audio, settings };
+  (window as unknown as { __RZA: unknown }).__RZA = { game, audio, settings, progress };
 
   bootScreen.classList.add('hidden');
   game.onStateChange('menu');

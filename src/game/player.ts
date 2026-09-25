@@ -15,7 +15,16 @@ import {
   sprintMultiplier,
   type PerkId,
 } from './rules.ts';
-import { fireInterval, getWeapon, reloadDuration, startingAmmo, type WeaponDef } from './weapons.ts';
+import {
+  fireInterval,
+  getWeapon,
+  magFor,
+  reloadDuration,
+  reserveFor,
+  startingAmmo,
+  type AmmoMod,
+  type WeaponDef,
+} from './weapons.ts';
 
 export const PLAYER_RADIUS = 0.82;
 export const EYE_HEIGHT = 3.05;
@@ -27,7 +36,10 @@ export type Slot = {
   id: string;
   mag: number;
   reserve: number;
-  packed: boolean;
+  /** Pack-a-Punch tier, 0 (stock) to 3. */
+  tier: number;
+  /** Elemental ammo mod, rolled at tier II. */
+  mod: AmmoMod | null;
 };
 
 export type FireOutcome =
@@ -75,6 +87,9 @@ export class Player {
   private grenadeTimer = 0;
   /** Speed of the horizontal movement last frame, for bob and audio. */
   planarSpeed = 0;
+  /** An outside shove (a boss slam, a charge) that decays over a moment. */
+  pushX = 0;
+  pushZ = 0;
 
   reset(x: number, z: number): void {
     this.x = x;
@@ -90,7 +105,9 @@ export class Player {
     this.headshots = 0;
     this.downs = 0;
     this.perks.clear();
-    this.slots = [{ id: 'sidearm', ...startingAmmo(getWeapon('sidearm')), packed: false }];
+    this.slots = [{ id: 'sidearm', ...startingAmmo(getWeapon('sidearm')), tier: 0, mod: null }];
+    this.pushX = 0;
+    this.pushZ = 0;
     this.activeSlot = 0;
     this.grenades = 0;
     this.hasGrenades = false;
@@ -147,17 +164,17 @@ export class Player {
    * Adds a weapon. Fills the empty slot if there is one, otherwise replaces the
    * weapon currently in hand - the same rule the source material uses.
    */
-  giveWeapon(id: string, packed = false): 'added' | 'replaced' | 'refilled' {
+  giveWeapon(id: string, tier = 0): 'added' | 'replaced' | 'refilled' {
     const def = getWeapon(id);
     const existing = this.hasWeapon(id);
-    if (existing >= 0 && this.slots[existing].packed === packed) {
+    if (existing >= 0) {
       const s = this.slots[existing];
-      s.mag = def.magSize;
-      s.reserve = def.reserveMax;
+      s.mag = magFor(def, s.tier);
+      s.reserve = reserveFor(def, s.tier);
       this.activeSlot = existing;
       return 'refilled';
     }
-    const fresh: Slot = { id, ...startingAmmo(def), packed };
+    const fresh: Slot = { id, ...startingAmmo(def, tier), tier, mod: null };
     if (this.slots.length < MAX_SLOTS) {
       this.slots.push(fresh);
       this.activeSlot = this.slots.length - 1;
@@ -173,15 +190,15 @@ export class Player {
     if (i < 0) return false;
     const def = getWeapon(id);
     const s = this.slots[i];
-    if (s.reserve >= def.reserveMax && s.mag >= def.magSize) return false;
-    s.reserve = def.reserveMax;
+    if (s.reserve >= reserveFor(def, s.tier) && s.mag >= magFor(def, s.tier)) return false;
+    s.reserve = reserveFor(def, s.tier);
     return true;
   }
 
   maxAmmo(): void {
     for (const s of this.slots) {
       const def = getWeapon(s.id);
-      s.reserve = def.reserveMax;
+      s.reserve = reserveFor(def, s.tier);
     }
     if (this.hasGrenades) this.grenades = 4;
   }
@@ -242,8 +259,11 @@ export class Player {
     }
 
     const airControl = this.grounded ? 1 : 0.55;
-    this.x += dx * speed * airControl * dt;
-    this.z += dz * speed * airControl * dt;
+    this.x += (dx * speed * airControl + this.pushX) * dt;
+    this.z += (dz * speed * airControl + this.pushZ) * dt;
+    const drag = Math.pow(0.02, dt);
+    this.pushX *= drag;
+    this.pushZ *= drag;
     this.planarSpeed = Math.hypot(dx, dz) * speed;
 
     const res = grid.resolveCircle(this.x, this.z, PLAYER_RADIUS);
@@ -299,16 +319,16 @@ export class Player {
         if (s) {
           const def = getWeapon(s.id);
           if (def.shellReload) {
-            const need = Math.min(1, def.magSize - s.mag, s.reserve);
+            const need = Math.min(1, magFor(def, s.tier) - s.mag, s.reserve);
             s.mag += need;
             s.reserve -= need;
             onEvent('shell');
-            if (s.mag < def.magSize && s.reserve > 0 && this.shellReloadPending) {
+            if (s.mag < magFor(def, s.tier) && s.reserve > 0 && this.shellReloadPending) {
               this.reloadTimer = reloadDuration(def, this.perks.has('speedcola'));
               return;
             }
           } else {
-            const need = Math.min(def.magSize - s.mag, s.reserve);
+            const need = Math.min(magFor(def, s.tier) - s.mag, s.reserve);
             s.mag += need;
             s.reserve -= need;
             onEvent('reloaded');
@@ -351,7 +371,7 @@ export class Player {
     if (!this.alive || this.busy) return false;
     const def = this.weapon;
     const s = this.slot;
-    if (s.mag >= def.magSize || s.reserve <= 0) return false;
+    if (s.mag >= magFor(def, s.tier) || s.reserve <= 0) return false;
     this.reloadTimer = reloadDuration(def, this.perks.has('speedcola'));
     this.reloadingSlot = this.activeSlot;
     this.shellReloadPending = def.shellReload;

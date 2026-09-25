@@ -3,7 +3,7 @@
  * asylum, stands an invulnerable player in the start room and measures how
  * many of the horde reach them, and how fast, over several seeds.
  *
- *   npm run build && node tools/pursuit.mjs [seconds]
+ *   npm run build && node tools/pursuit.mjs [seconds] [--map=town] [--pure]
  */
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -17,6 +17,8 @@ const SECONDS = Number(process.argv[2] ?? 40);
 // --pure switches recycling off, to measure pathing on its own.
 const PURE = process.argv.includes('--pure');
 const SEEDS = [4242, 7, 90210, 1234, 555];
+const mapArg = process.argv.find((a) => a.startsWith('--map='));
+const MAP = mapArg ? mapArg.slice(6) : 'asylum';
 
 const server = createServer(async (req, res) => {
   try {
@@ -37,9 +39,9 @@ await page.goto(`http://127.0.0.1:${server.address().port}/`, { waitUntil: 'load
 await page.waitForFunction(() => Boolean(window.__RZA));
 
 for (const seed of SEEDS) {
-  const r = await page.evaluate(({ seed, seconds, pure }) => {
+  const r = await page.evaluate(({ seed, seconds, pure, map }) => {
     const g = window.__RZA.game;
-    g.newRun(seed);
+    g.newRun(seed, map);
     g.input.locked = true;
     g.pool.reset();
     g.player.award(1e6);
@@ -56,7 +58,8 @@ for (const seed of SEEDS) {
     for (let n = 0; n < 18; n++) {
       const e = g.pool.acquire('walker');
       const t = floor[Math.floor(g.rng.next() * floor.length)];
-      e.spawn('walker', (t % 56 + 0.5) * 4, (Math.floor(t / 56) + 0.5) * 4, 1e6, 1, null, g.rng);
+      const W = Math.sqrt(L.tiles.length);
+      e.spawn('walker', (t % W + 0.5) * 4, (Math.floor(t / W) + 0.5) * 4, 1e6, 1, null, g.rng);
       e.state = 'hunt';
       bodies.push({ e, reached: -1, start: Math.hypot(e.x - g.player.x, e.z - g.player.z) });
     }
@@ -80,7 +83,7 @@ for (const seed of SEEDS) {
       slowest: times.length ? times[times.length - 1].toFixed(1) : '-',
       stuck: bodies.filter((b) => b.reached < 0 && b.e.active).map((b) => `${(b.e.x / 4).toFixed(1)},${(b.e.z / 4).toFixed(1)}`),
     };
-  }, { seed, seconds: SECONDS, pure: PURE });
+  }, { seed, seconds: SECONDS, pure: PURE, map: MAP });
   console.log(`seed ${String(seed).padEnd(6)} reached ${String(r.reached).padStart(2)}/18  recycled ${r.recycled}  median ${r.median}s  slowest ${r.slowest}s  never arrived: ${r.stuck.join(' ') || 'none'}`);
 }
 await browser.close();

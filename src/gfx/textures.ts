@@ -455,6 +455,147 @@ function dirt(base: number, seed: number): HTMLCanvasElement {
   return p.c;
 }
 
+/* ------------------------------------------------------------ town & works */
+
+function asphalt(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x2e2e30);
+  for (let i = 0; i < 1800; i++) p.rect(p.rng.int(128), p.rng.int(128), 1, 1, rgba(p.rng.chance(0.5) ? 0x5a5a5a : 0x141414, 0.6));
+  p.blotches(0x0a0a0a, 0.3, 6, 10, 30);
+  p.cracks(rgba(0x0a0a0a, 0.8), 6, 60);
+  // A worn road marking.
+  for (let y = 4; y < 128; y += 32) p.rect(62, y, 4, 16, rgba(0xc8b060, 0.35));
+  p.noise(10);
+  return p.c;
+}
+
+function cobble(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x1e1c1a);
+  for (let y = 0; y < 128; y += 10) {
+    let x = (y / 10) % 2 === 0 ? 0 : -6;
+    while (x < 128) {
+      const w = 9 + p.rng.int(6);
+      p.rect(x + 1, y + 1, w - 2, 8, rgb(shade(0x5a5650, Math.round(p.rng.range(-18, 14)))));
+      p.rect(x + 1, y + 1, w - 2, 1, rgba(0xffffff, 0.1));
+      x += w;
+    }
+  }
+  p.blotches(0x0a0806, 0.25, 6, 12, 30);
+  p.noise(10);
+  return p.c;
+}
+
+function grass(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x26341c);
+  for (let i = 0; i < 2600; i++) {
+    const c = p.rng.pick([0x3a4a24, 0x1a2412, 0x4a5a2c, 0x2e3a1c]);
+    p.rect(p.rng.int(128), p.rng.int(128), 1, 1 + p.rng.int(3), rgb(c));
+  }
+  p.blotches(0x3a2e1e, 0.4, 6, 8, 24);
+  p.noise(8);
+  return p.c;
+}
+
+function gravel(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x4a4640);
+  for (let i = 0; i < 1400; i++) {
+    const s = 1 + p.rng.int(3);
+    p.rect(p.rng.int(128), p.rng.int(128), s, s, rgb(shade(0x5a5650, Math.round(p.rng.range(-30, 30)))));
+  }
+  p.blotches(0x1a1814, 0.3, 6, 10, 28);
+  p.noise(10);
+  return p.c;
+}
+
+/** Shopfront brick with a dark sash window in every bay. */
+function facade(base: number, seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed);
+  p.x.drawImage(brick(base, 0x2e2824, seed + 1), 0, 0);
+  for (const x of [14, 78]) {
+    p.rect(x - 3, 30, 42, 58, rgb(0x2a2420));
+    p.rect(x, 33, 36, 52, rgb(0x0c1018));
+    p.rect(x + 17, 33, 2, 52, rgb(0x2a2420));
+    p.rect(x, 58, 36, 2, rgb(0x2a2420));
+    p.rect(x + 2, 35, 12, 6, rgba(0x6a7a9a, 0.3));
+    p.rect(x - 4, 88, 44, 4, rgb(0x6a6258));
+  }
+  p.streaks(0x0a0806, 0.3, 8);
+  p.noise(8);
+  return p.c;
+}
+
+/** Painted clapboard siding, peeling. */
+function siding(base: number, seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(shade(base, -40));
+  for (let y = 0; y < 128; y += 12) {
+    p.rect(0, y, 128, 11, rgb(shade(base, Math.round(p.rng.range(-10, 10)))));
+    p.rect(0, y + 10, 128, 2, rgba(0x000000, 0.35));
+  }
+  for (let i = 0; i < 8; i++) p.rect(p.rng.int(120), p.rng.int(120), 4 + p.rng.int(14), 2 + p.rng.int(6), rgb(0x6a5a44));
+  p.streaks(0x2a2418, 0.3, 10);
+  p.noise(8);
+  return p.c;
+}
+
+/** Rusted corrugated steel sheeting. */
+function corrugated(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x4a4e50);
+  for (let x = 0; x < 128; x += 8) {
+    p.rect(x, 0, 4, 128, rgba(0xffffff, 0.08));
+    p.rect(x + 5, 0, 2, 128, rgba(0x000000, 0.3));
+  }
+  p.blotches(0x7a3a14, 0.5, 9, 8, 26);
+  p.streaks(0x6a2a0a, 0.5, 16);
+  p.noise(10);
+  return p.c;
+}
+
+/** Clean composite wall panels, with the odd bloody handprint. */
+function labPanel(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0xb4bcc0);
+  for (const v of [0, 64]) {
+    p.rect(0, v, 128, 2, rgba(0x000000, 0.25));
+    p.rect(v, 0, 2, 128, rgba(0x000000, 0.25));
+  }
+  p.rect(0, 100, 128, 6, rgb(0x2a6a8a));
+  p.blotches(0x5a6a70, 0.12, 4, 12, 30);
+  p.blotches(0x6a0806, 0.5, 2, 3, 7);
+  p.noise(5);
+  return p.c;
+}
+
+function labFloor(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x5a6670);
+  for (const v of [0, 64]) {
+    p.rect(0, v, 128, 1, rgba(0xffffff, 0.12));
+    p.rect(v, 0, 1, 128, rgba(0xffffff, 0.12));
+  }
+  p.blotches(0x2a3238, 0.2, 6, 12, 30);
+  p.blotches(0x5a0806, 0.35, 2, 4, 10);
+  p.noise(6);
+  return p.c;
+}
+
+/** What the underground "windows" look out on: a vent shaft with a slow fan. */
+function ventShaft(seed: number): HTMLCanvasElement {
+  const p = new Painter(128, seed).fill(0x101418);
+  for (let i = 0; i < 128; i += 16) p.rect(0, i, 128, 2, rgb(0x1e262c));
+  p.x.strokeStyle = '#2a343c';
+  p.x.lineWidth = 6;
+  p.x.beginPath();
+  p.x.arc(64, 64, 40, 0, Math.PI * 2);
+  p.x.stroke();
+  p.x.fillStyle = '#1e262c';
+  for (let i = 0; i < 4; i++) {
+    p.x.save();
+    p.x.translate(64, 64);
+    p.x.rotate((i * Math.PI) / 2 + 0.3);
+    p.x.fillRect(-6, 0, 12, 36);
+    p.x.restore();
+  }
+  p.noise(8);
+  return p.c;
+}
+
 /* --------------------------------------------------------------- ceilings */
 
 function acoustic(base: number, seed: number): HTMLCanvasElement {
@@ -818,6 +959,25 @@ function papCamo(seed: number): HTMLCanvasElement {
   return p.c;
 }
 
+/** Tier II camo: crimson and molten orange, cracked like cooling slag. */
+function hellfireCamo(seed: number): HTMLCanvasElement {
+  const p = new Painter(64, seed).fill(0x2a0806);
+  for (let i = 0; i < 16; i++) p.blotches(p.rng.pick([0x9a1a0c, 0xd8501a, 0x6a0a06]), 0.85, 1, 5, 15);
+  p.cracks(rgba(0xffc040, 0.9), 12, 26);
+  p.noise(10);
+  return p.c;
+}
+
+/** Tier III camo: burnished gold shot through with cyan. */
+function aetherCamo(seed: number): HTMLCanvasElement {
+  const p = new Painter(64, seed).fill(0x3a2a08);
+  for (let i = 0; i < 16; i++) p.blotches(p.rng.pick([0xc89a2a, 0xf0d060, 0x8a6a18]), 0.85, 1, 6, 16);
+  for (let i = 0; i < 30; i++) p.rect(p.rng.int(64), p.rng.int(64), 2, 1, rgba(0x6affff, 0.85));
+  p.cracks(rgba(0x3affe8, 0.7), 6, 20);
+  p.noise(8);
+  return p.c;
+}
+
 /** Perforated steel for a shotgun heat shield. */
 function perforated(seed: number): HTMLCanvasElement {
   const p = new Painter(32, seed).fill(0x2a2c30);
@@ -856,6 +1016,17 @@ export type TextureSet = {
   floorDirt: THREE.CanvasTexture;
   ground: THREE.CanvasTexture;
   nightSky: THREE.CanvasTexture;
+  asphalt: THREE.CanvasTexture;
+  cobble: THREE.CanvasTexture;
+  grass: THREE.CanvasTexture;
+  gravel: THREE.CanvasTexture;
+  facade: THREE.CanvasTexture;
+  facadeGrey: THREE.CanvasTexture;
+  siding: THREE.CanvasTexture;
+  corrugated: THREE.CanvasTexture;
+  labPanel: THREE.CanvasTexture;
+  labFloor: THREE.CanvasTexture;
+  ventShaft: THREE.CanvasTexture;
 
   ceilAcoustic: THREE.CanvasTexture;
   ceilConcrete: THREE.CanvasTexture;
@@ -881,6 +1052,8 @@ export type TextureSet = {
   gunMetal: THREE.CanvasTexture;
   sleeve: THREE.CanvasTexture;
   camo: THREE.CanvasTexture;
+  camo2: THREE.CanvasTexture;
+  camo3: THREE.CanvasTexture;
   perforated: THREE.CanvasTexture;
 };
 
@@ -914,6 +1087,17 @@ export function textures(): TextureSet {
     floorDirt: finish(dirt(0x4a3e30, 0x101d)),
     ground: finish(dirt(0x2c3226, 0x101e)),
     nightSky: finish(nightSky(0x1025)),
+    asphalt: finish(asphalt(0x1030)),
+    cobble: finish(cobble(0x1031)),
+    grass: finish(grass(0x1032)),
+    gravel: finish(gravel(0x1033)),
+    facade: finish(facade(0x7a4030, 0x1034)),
+    facadeGrey: finish(facade(0x5e5a54, 0x1035)),
+    siding: finish(siding(0x6a7a70, 0x1036)),
+    corrugated: finish(corrugated(0x1037)),
+    labPanel: finish(labPanel(0x1038)),
+    labFloor: finish(labFloor(0x1039)),
+    ventShaft: finish(ventShaft(0x103a)),
 
     ceilAcoustic: finish(acoustic(0x8a867a, 0x100c)),
     ceilConcrete: finish(concrete(0x403e38, 0x101f)),
@@ -950,6 +1134,8 @@ export function textures(): TextureSet {
     gunMetal: finish(gunMetal(0x6003)),
     sleeve: finish(fabricWeave(0x4a4a34, 0x6004)),
     camo: finish(papCamo(0x6005)),
+    camo2: finish(hellfireCamo(0x6007)),
+    camo3: finish(aetherCamo(0x6008)),
     perforated: finish(perforated(0x6006)),
   };
   for (const t of [cache.blood, [cache.bullet, cache.glow], cache.flash].flat()) {

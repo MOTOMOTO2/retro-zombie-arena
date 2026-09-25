@@ -3,7 +3,9 @@
  * from a fixed seed, drives the camera into every room and a few set pieces,
  * and writes screenshots plus brightness stats of the finished frame.
  *
- *   npm run build && node tools/diag.mjs [seed]
+ *   npm run build && node tools/diag.mjs [seed] [--map=town]
+ *
+ * Shots land in tools/shots/<map>/.
  */
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
@@ -13,7 +15,10 @@ import { chromium } from 'playwright';
 
 const ROOT = fileURLToPath(new URL('../dist', import.meta.url));
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
-const SEED = Number(process.argv[2] ?? 4242);
+const mapArg = process.argv.find((a) => a.startsWith('--map='));
+const MAP = mapArg ? mapArg.slice(6) : 'asylum';
+const SEED = Number(process.argv.slice(2).find((a) => !a.startsWith('--')) ?? 4242);
+const OUT = `tools/shots/${MAP}`;
 
 const server = createServer(async (req, res) => {
   try {
@@ -28,7 +33,7 @@ const server = createServer(async (req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
-await mkdir('tools/shots', { recursive: true });
+await mkdir(OUT, { recursive: true });
 
 const browser = await chromium.launch({
   headless: true,
@@ -40,12 +45,12 @@ page.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE', m.t
 await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
 await page.waitForFunction(() => Boolean(window.__RZA));
 
-await page.screenshot({ path: 'tools/shots/menu.png' });
+await page.screenshot({ path: `${OUT}/menu.png` });
 
-const plan = await page.evaluate((seed) => {
+const plan = await page.evaluate(([seed, map]) => {
   const { game } = window.__RZA;
   const t0 = performance.now();
-  game.newRun(seed);
+  game.newRun(seed, map);
   const buildMs = performance.now() - t0;
   game.input.locked = true;
   // Hide the HUD text overlays so the shots show the world.
@@ -128,9 +133,9 @@ const plan = await page.evaluate((seed) => {
     rooms,
     window: { ...inside, yaw: Math.atan2(-b.dx, -b.dz), b },
   };
-}, SEED);
+}, [SEED, MAP]);
 
-console.log(`seed ${plan.seed}: world built in ${plan.buildMs} ms`);
+console.log(`${MAP} seed ${plan.seed}: world built in ${plan.buildMs} ms`);
 
 const shots = [
   ['spawn', { ...plan.spawn, frames: 30 }],
@@ -144,7 +149,7 @@ const shots = [
 
 for (const [name, opts] of shots) {
   const stats = await page.evaluate((o) => window.__shot(o), opts);
-  await page.screenshot({ path: `tools/shots/${name}.png` });
+  await page.screenshot({ path: `${OUT}/${name}.png` });
   console.log(`${name.padEnd(22)} mean ${String(stats.mean).padStart(6)}   near-black ${String(stats.dark).padStart(3)}%`);
 }
 

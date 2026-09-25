@@ -584,6 +584,118 @@ export class AudioEngine {
     freqs.forEach((f, i) => this.tone(type, f, f, 0.16, gain, 0, i * step, 0.2));
   }
 
+  /* ------------------------------------------------------- box and story */
+
+  /** The mystery box's music-box waltz, slowing as it runs down. */
+  musicBox(duration = 3.6): void {
+    const tune = [659, 784, 988, 1319, 1175, 988, 784, 880, 740, 587, 659, 523, 494, 440];
+    let t = 0;
+    for (let i = 0; i < tune.length && t < duration - 0.2; i++) {
+      const f = tune[i];
+      this.tone('sine', f, f * 0.998, 0.5, 0.09, -0.1, t, 0.35);
+      this.tone('triangle', f * 2, f * 2, 0.25, 0.025, 0.1, t, 0.35);
+      t += 0.2 + (t / duration) * 0.16;
+    }
+  }
+
+  /** What plays when the box settles: louder and brighter the rarer the gun. */
+  reveal(rarity: 'common' | 'rare' | 'epic' | 'legendary'): void {
+    if (rarity === 'legendary') {
+      this.arpeggio([523, 659, 784, 1047, 1319, 1568, 2093], 0.07, 0.15, 'square');
+      for (const f of [523, 659, 784, 1047]) this.tone('sawtooth', f, f, 1.4, 0.06, 0, 0.5, 0.5);
+      this.noise(0.8, 'highpass', 5000, 0.7, 0.1, 0, 3, 0.5, 0.45);
+    } else if (rarity === 'epic') {
+      this.arpeggio([440, 554, 659, 880, 1109], 0.07, 0.14, 'triangle');
+      this.tone('sine', 880, 880, 0.9, 0.06, 0, 0.35, 0.4);
+    } else if (rarity === 'rare') {
+      this.arpeggio([523, 659, 784, 1047], 0.07, 0.13, 'triangle');
+    } else {
+      this.buy();
+    }
+  }
+
+  /** The teddy bear's giggle: three wheezy syllables and a sour note. */
+  teddy(): void {
+    for (let i = 0; i < 3; i++) {
+      this.tone('sawtooth', 330 - i * 30, 250 - i * 30, 0.13, 0.1, 0, i * 0.19, 0.4);
+      this.noise(0.05, 'bandpass', 1800, 3, 0.08, 0, 1.5, 0.3, i * 0.19);
+    }
+    this.tone('sine', 311, 294, 1.2, 0.08, 0, 0.6, 0.5);
+  }
+
+  /** Lightning: a crackle of short bursts over a falling whine. */
+  zap(at?: Vec): void {
+    const { gain, pan } = this.spatial(at, 90);
+    if (gain <= 0.01) return;
+    for (let i = 0; i < 5; i++) this.noise(0.02, 'highpass', 2600 + Math.random() * 3000, 1.2, 0.26 * gain, pan, 1.4, 0.3, Math.random() * 0.18);
+    this.tone('sawtooth', 1600, 180, 0.28, 0.09 * gain, pan, 0, 0.3);
+  }
+
+  freeze(at?: Vec): void {
+    const { gain, pan } = this.spatial(at, 80);
+    if (gain <= 0.01) return;
+    this.noise(0.3, 'highpass', 5200, 0.8, 0.25 * gain, pan, 2.5, 0.4);
+    this.tone('sine', 2600, 1300, 0.45, 0.06 * gain, pan, 0, 0.4);
+    for (let i = 0; i < 4; i++) this.noise(0.015, 'bandpass', 6000, 3, 0.2 * gain, pan, 1.2, 0.3, 0.05 + Math.random() * 0.3);
+  }
+
+  fireBurst(at?: Vec): void {
+    const { gain, pan } = this.spatial(at, 80);
+    if (gain <= 0.01) return;
+    this.noise(0.4, 'lowpass', 900, 0.7, 0.4 * gain, pan, 2.6, 0.3, 0, 300);
+    this.tone('sine', 110, 50, 0.3, 0.2 * gain, pan);
+  }
+
+  /** One tick of a flamethrower; at fifteen a second it becomes a roar. */
+  flameTick(): void {
+    this.noise(0.07, 'bandpass', 500 + Math.random() * 400, 0.6, 0.12, 0.1, 1.8);
+  }
+
+  /** A boss announcing itself: a huge growl over a sub-bass swell. */
+  bossRoar(at?: Vec, pitch = 0.5): void {
+    const where = at ?? this.listener;
+    this.zombieVoice(where, 'growl', pitch);
+    this.zombieVoice(where, 'moan', pitch * 0.8);
+    const { gain, pan } = this.spatial(at, 200);
+    this.tone('sine', 70, 38, 1.6, 0.35 * Math.max(0.3, gain), pan, 0, 0.5);
+    this.noise(1.2, 'lowpass', 300, 0.7, 0.2 * Math.max(0.3, gain), pan, 3, 0.5);
+  }
+
+  /** A boss hitting the floor. */
+  slam(at?: Vec): void {
+    const { gain, pan } = this.spatial(at, 120);
+    if (gain <= 0.01) return;
+    this.noise(0.35, 'lowpass', 400, 0.8, 0.8 * gain, pan, 3, 0.4);
+    this.tone('sine', 90, 26, 0.7, 0.6 * gain, pan, 0, 0.3);
+    this.noise(0.15, 'bandpass', 1400, 1, 0.25 * gain, pan, 2, 0.3, 0.02);
+  }
+
+  /** Radio traffic: a squelch, two pips and a hiss of static. */
+  radio(): void {
+    this.noise(0.12, 'bandpass', 2200, 1.5, 0.12, 0, 2, 0.1);
+    this.tone('square', 1200, 1200, 0.06, 0.05, 0, 0.12);
+    this.tone('square', 1600, 1600, 0.06, 0.05, 0, 0.22);
+    this.noise(0.5, 'bandpass', 3000, 0.6, 0.04, 0, 2.5, 0, 0.3);
+  }
+
+  pickup(): void {
+    this.arpeggio([784, 988, 1175, 1568], 0.05, 0.12, 'triangle');
+  }
+
+  objective(): void {
+    this.tone('triangle', 659, 659, 0.25, 0.12, 0, 0, 0.3);
+    this.tone('triangle', 988, 988, 0.4, 0.12, 0, 0.14, 0.3);
+  }
+
+  /** The swell when a chapter is done. */
+  victory(): void {
+    const chords = [[262, 330, 392], [349, 440, 523], [392, 494, 587], [523, 659, 784, 1047]];
+    chords.forEach((c, i) => {
+      for (const f of c) this.tone('sawtooth', f, f, 0.9, 0.05, 0, i * 0.55, 0.5);
+      for (const f of c) this.tone('sine', f / 2, f / 2, 0.9, 0.06, 0, i * 0.55, 0.5);
+    });
+  }
+
   /* -------------------------------------------------------------- ambient */
 
   startMusic(): void {

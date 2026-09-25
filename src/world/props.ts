@@ -8,7 +8,7 @@
  */
 
 import * as THREE from 'three';
-import { flatMaterial, buildWeaponModel } from '../gfx/models.ts';
+import { flatMaterial, buildTeddy, buildWeaponModel } from '../gfx/models.ts';
 import { placardTexture, perkTexture, textures } from '../gfx/textures.ts';
 import { getWeapon } from '../game/weapons.ts';
 import { PERK_INFO, type PerkId } from '../game/rules.ts';
@@ -329,17 +329,24 @@ export class MysteryBox {
   readonly group: THREE.Group;
   center = new THREE.Vector3();
   padIndex = 0;
+  private readonly body = new THREE.Group();
   private readonly lid: THREE.Group;
   private readonly beam: THREE.Mesh;
+  private readonly beamMat: THREE.MeshBasicMaterial;
+  private readonly halo: THREE.Sprite;
   private readonly light: THREE.PointLight;
-  private weaponHolder: THREE.Group;
+  private readonly weaponHolder: THREE.Group;
+  private readonly bear: THREE.Group;
   private currentModel: THREE.Group | null = null;
   private readonly shelf = new ModelShelf(2.2);
   private readonly litMats: { mat: THREE.MeshLambertMaterial; base: THREE.Color }[] = [];
+  private readonly glowColor = new THREE.Color(0x7ac8ff);
+  private rise = 0;
   lidOpen = 0;
 
   constructor() {
     this.group = new THREE.Group();
+    this.group.add(this.body);
     const tex = textures();
 
     const crate = new THREE.Mesh(
@@ -347,13 +354,16 @@ export class MysteryBox {
       new THREE.MeshLambertMaterial({ map: tex.wood }),
     );
     crate.position.y = 0.8;
-    this.group.add(crate);
-
+    this.body.add(crate);
+    // Brass-cornered and stencilled, so it reads as the box from across a room.
     for (const [x, z] of [[-1.25, -0.8], [1.25, -0.8], [-1.25, 0.8], [1.25, 0.8]]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.7, 0.22), flatMaterial(0x4a3b2a));
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.7, 0.24), flatMaterial(0x8a6a2a));
       post.position.set(x, 0.85, z);
-      this.group.add(post);
+      this.body.add(post);
     }
+    const band = new THREE.Mesh(new THREE.BoxGeometry(2.66, 0.18, 1.76), flatMaterial(0x6a4a1a));
+    band.position.y = 0.45;
+    this.body.add(band);
 
     // Hinged at the back, so it opens away from whoever is buying.
     this.lid = new THREE.Group();
@@ -364,34 +374,47 @@ export class MysteryBox {
     );
     lidMesh.position.set(0, 0.1, 0.87);
     this.lid.add(lidMesh);
-    this.group.add(this.lid);
+    this.body.add(this.lid);
 
     this.weaponHolder = new THREE.Group();
-    this.weaponHolder.position.set(0, 2.4, 0);
-    this.group.add(this.weaponHolder);
+    this.weaponHolder.position.set(0, 1.8, 0);
+    this.body.add(this.weaponHolder);
 
-    this.beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.7, 1.1, 6, 8, 1, true),
-      new THREE.MeshBasicMaterial({
-        color: 0xffd04d,
-        transparent: true,
-        opacity: 0,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      }),
-    );
-    this.beam.position.y = 4.4;
-    this.group.add(this.beam);
+    this.bear = buildTeddy();
+    this.bear.visible = false;
+    this.weaponHolder.add(this.bear);
 
-    this.light = new THREE.PointLight(0xffc44d, 0, 18, 2);
+    // The beam: always on, faint blue, so the box can be found from afar -
+    // gold while it rolls, then the colour of whatever it gave you.
+    this.beamMat = new THREE.MeshBasicMaterial({
+      color: this.glowColor,
+      transparent: true,
+      opacity: 0.16,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+    });
+    this.beam = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.95, WALL_H - 1.6, 10, 1, true), this.beamMat);
+    this.beam.position.y = 1.6 + (WALL_H - 1.6) / 2;
+    this.body.add(this.beam);
+
+    this.halo = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex.glow, color: this.glowColor, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    this.halo.scale.set(3.4, 3.4, 1);
+    this.weaponHolder.add(this.halo);
+
+    this.light = new THREE.PointLight(0x7ac8ff, 6, 14, 2);
     this.light.position.set(0, 2.4, 0.8);
-    this.group.add(this.light);
+    this.body.add(this.light);
 
     // The box travels, so it keeps private materials and re-lights on every move.
-    this.group.traverse((o) => {
+    this.body.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh || !(mesh.material instanceof THREE.MeshLambertMaterial)) return;
+      if (this.bear && isChildOf(mesh, this.bear)) return;
       const mat = mesh.material.clone();
       mesh.material = mat;
       this.litMats.push({ mat, base: mat.color.clone() });
@@ -422,20 +445,52 @@ export class MysteryBox {
     this.weaponHolder.add(this.currentModel);
   }
 
+  /** The teddy bear: the box is about to leave. */
+  showBear(on: boolean): void {
+    if (on) this.showWeapon(null);
+    this.bear.visible = on;
+  }
+
+  /** Beam, halo and light colour: blue at rest, gold while rolling, rarity on reveal. */
+  setGlow(color: number, strength: number): void {
+    this.glowColor.setHex(color);
+    this.beamMat.color.copy(this.glowColor);
+    (this.halo.material as THREE.SpriteMaterial).color.copy(this.glowColor).multiplyScalar(1.6);
+    (this.halo.material as THREE.SpriteMaterial).opacity = strength;
+    this.light.color.copy(this.glowColor);
+  }
+
+  /** How far the gun has risen out of the box, 0-1. */
+  setRise(t: number): void {
+    this.rise = Math.max(0, Math.min(1, t));
+  }
+
+  /** 0 = sitting on its pad; 1 = gone, flown up through the ceiling. */
+  setAway(t: number): void {
+    const k = Math.max(0, Math.min(1, t));
+    this.body.position.y = k * k * 7;
+    this.body.rotation.y = k * 3;
+    this.body.scale.setScalar(1 - k * 0.7);
+    this.body.visible = k < 0.99;
+  }
+
   setLid(openAmount: number): void {
     this.lidOpen = openAmount;
     this.lid.rotation.x = -openAmount * 1.9;
-    const mat = this.beam.material as THREE.MeshBasicMaterial;
-    mat.opacity = openAmount * 0.3;
-    this.light.intensity = openAmount * 34;
   }
 
   animate(t: number, spin: number): void {
-    this.weaponHolder.rotation.y = spin;
-    this.weaponHolder.position.y = 2.4 + Math.sin(t * 3) * 0.1;
-    const mat = this.beam.material as THREE.MeshBasicMaterial;
-    if (this.lidOpen > 0) mat.opacity = this.lidOpen * (0.24 + Math.sin(t * 7) * 0.08);
+    this.weaponHolder.rotation.y = this.bear.visible ? Math.sin(t * 2) * 0.4 : spin;
+    this.weaponHolder.position.y = 1.7 + this.rise * 1.1 + Math.sin(t * 3) * 0.08;
+    const pulse = 0.5 + 0.5 * Math.sin(t * 2.2);
+    this.beamMat.opacity = (0.1 + pulse * 0.06) + this.lidOpen * 0.18;
+    this.light.intensity = 5 + pulse * 2 + this.lidOpen * 30;
   }
+}
+
+function isChildOf(o: THREE.Object3D, parent: THREE.Object3D): boolean {
+  for (let p: THREE.Object3D | null = o; p; p = p.parent) if (p === parent) return true;
+  return false;
 }
 
 /* --------------------------------------------------------------- wall buy */

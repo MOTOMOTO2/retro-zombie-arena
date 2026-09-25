@@ -84,9 +84,13 @@ await page.evaluate(() => {
     }
     return { min, max: Math.round(max), mean: +(sum / (f.pixels.length / 4)).toFixed(1) };
   };
-  game.newRun();
-  game.input.locked = true;
 });
+
+// Title screen first, before anything starts a run.
+await page.screenshot({ path: 'tools/shots/menu.png' });
+await page.click('#btn-howto');
+await page.screenshot({ path: 'tools/shots/howto.png' });
+await page.click('#menu-howto .btn.back');
 
 const shots = [
   ['lobby-spawn', { reset: true, yaw: Math.PI, frames: 60 }],

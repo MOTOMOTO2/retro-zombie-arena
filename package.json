@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
-    "test:browser": "node test/browser-smoke.mjs",
+    "test:browser": "npm run build && node test/browser-smoke.mjs",
     "map": "node tools/mapcheck.mjs"
   },
   "dependencies": {

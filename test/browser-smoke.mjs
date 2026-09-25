@@ -230,6 +230,94 @@ try {
 
   for (const [k, v] of Object.entries(economy)) check(`economy: ${k}`, v === true);
 
+  // --------------------------------------------------------------- gunplay
+  const gunplay = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun();
+    game.input.locked = true;
+    game.player.giveWeapon('trench');
+    game.viewmodel.equip(game.player.slot.id);
+
+    // Line a few walkers up straight ahead and hold the trigger down.
+    const fx = -Math.sin(game.player.yaw);
+    const fz = -Math.cos(game.player.yaw);
+    for (let i = 0; i < 3; i++) {
+      const e = game.pool.acquire('walker');
+      e.spawn('walker', game.player.x + fx * (9 + i * 4), game.player.z + fz * (9 + i * 4),
+        420, 3, null, game.rng);
+      e.state = 'hunt';
+    }
+
+    const magBefore = game.player.slot.mag;
+    const pointsBefore = game.player.points;
+    const killsBefore = game.player.kills;
+    game.input.fire = true;
+    for (let i = 0; i < 150; i++) game.update(1 / 60);
+    game.input.fire = false;
+
+    out.ammoSpent = game.player.slot.mag < magBefore || game.player.slot.reserve < 300;
+    out.pointsEarned = game.player.points > pointsBefore;
+    out.enemiesKilled = game.player.kills > killsBefore;
+    out.headshotsRegistered = game.player.headshots > 0;
+
+    // Reload refills the magazine from the reserve.
+    game.player.slot.mag = 0;
+    const reserveBefore = game.player.slot.reserve;
+    out.reloadStarts = game.player.tryReload();
+    for (let i = 0; i < 60 * 4; i++) game.update(1 / 60);
+    out.reloadRefills = game.player.slot.mag > 0 && game.player.slot.reserve < reserveBefore;
+
+    // An empty gun must not fire, and must not go negative.
+    game.player.slot.mag = 0;
+    game.player.slot.reserve = 0;
+    game.input.fire = true;
+    for (let i = 0; i < 60; i++) game.update(1 / 60);
+    game.input.fire = false;
+    out.emptyGunStaysEmpty = game.player.slot.mag === 0 && game.player.slot.reserve === 0;
+
+    // Bullets must not pass through walls: face one and shoot it.
+    game.newRun();
+    game.input.locked = true;
+    game.player.giveWeapon('trench');
+    game.viewmodel.equip(game.player.slot.id);
+    game.player.x = 18.5 * 4;
+    game.player.z = 34.5 * 4;
+    game.player.yaw = -Math.PI / 2; // straight at the lobby's west wall
+    const behind = game.pool.acquire('walker');
+    behind.spawn('walker', 15 * 4, 34.5 * 4, 400, 3, null, game.rng);
+    behind.state = 'hunt';
+    const hpBefore = behind.health;
+    game.input.fire = true;
+    for (let i = 0; i < 40; i++) game.update(1 / 60);
+    game.input.fire = false;
+    out.wallsStopBullets = behind.health === hpBefore;
+
+    // Grenades must be bought before they can be thrown.
+    game.newRun();
+    out.noFreeGrenades = game.player.grenades === 0 && !game.player.hasGrenades;
+    out.cannotThrowUnbought = game.player.tryGrenade() === false;
+
+    // Melee reaches, and the minimap renders without throwing.
+    game.hud.toggleMap(true);
+    for (let i = 0; i < 30; i++) game.update(1 / 60);
+    out.minimapDraws = game.hud.mapVisible;
+    game.hud.toggleMap(false);
+
+    // Pause and resume must round-trip.
+    game.pause();
+    const paused = game.state === 'paused';
+    const roundAtPause = game.round;
+    for (let i = 0; i < 120; i++) game.update(1 / 60);
+    out.pauseFreezesTheWorld = paused && game.round === roundAtPause;
+    game.resumeGame();
+    out.resumeWorks = game.state === 'playing';
+
+    return out;
+  });
+
+  for (const [k, v] of Object.entries(gunplay)) check(`gunplay: ${k}`, v === true);
+
   // ------------------------------------------------------ clearing a round
   const roundFlow = await page.evaluate(() => {
     const { game } = window.__RZA;

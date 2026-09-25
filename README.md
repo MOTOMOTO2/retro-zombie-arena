@@ -133,7 +133,7 @@ src/
     game.ts            the loop that ties it together
 test/
   logic.test.ts        33 unit tests over the pure half of the game
-  browser-smoke.mjs    39 checks driving the real game in headless Chromium
+  browser-smoke.mjs    52 checks driving the real game in headless Chromium
 tools/
   mapcheck.mjs         prints the arena as ASCII and validates prop placement
   diag.mjs             screenshots the built game from fixed camera positions
@@ -171,7 +171,7 @@ npm run typecheck     # tsc --noEmit, strict, erasableSyntaxOnly
 npm test              # 33 unit tests (node:test, runs .ts directly)
 npm run map           # prints the arena and validates every prop placement
 npm run build         # type-check + bundle
-npm run test:browser  # 39 checks in real headless Chromium (needs a build first)
+npm run test:browser  # builds, then runs 52 checks in real headless Chromium
 ```
 
 `npm test` covers the pure half: that the arena is fully connected once every
@@ -181,14 +181,17 @@ wall rather than through it, that the flow field strictly descends to its goal,
 and that the round curve never gets easier.
 
 `npm run test:browser` is the one that matters for "does it actually work". It
-serves `dist/`, opens it in headless Chromium with software WebGL, and drives
-the real game object: it reads the low-resolution framebuffer back and asserts
-the world rasterised with a real tonal range, runs 45 seconds of round 1 and
-checks that enemies spawn, tear boards off windows, get inside and hurt an idle
-player, buys a door and confirms the tile became walkable, buys a wall gun, a
-perk, Pack-a-Punch and a mystery box pull, applies power-ups, clears a round and
-checks the counter advanced, kills the player and checks the run reports stats —
-then asserts no console or page errors throughout.
+builds, serves `dist/`, opens it in headless Chromium with software WebGL, and
+drives the real game object. It reads the low-resolution framebuffer back and
+asserts the world rasterised with a real tonal range; runs 45 seconds of round 1
+and checks that enemies spawn, tear boards off windows, get inside and hurt an
+idle player; buys a door and confirms the tile became walkable; buys a wall gun,
+a perk, Pack-a-Punch and a mystery box pull; applies power-ups; holds the
+trigger down on a line of zombies and checks that ammo drains, points accrue,
+headshots register, reloads refill, an empty gun stays empty and a wall stops a
+bullet; clears a round and checks the counter advanced; pauses and resumes;
+kills the player and checks the run reports stats — then asserts no console or
+page errors throughout.
 
 It needs Chromium once: `npx playwright install chromium`.
 

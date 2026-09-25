@@ -1,21 +1,10 @@
 /**
- * Weapon table. Everything here is plain data so the balance can be unit tested
- * and the view models can be built procedurally - no art assets in the repo.
+ * Weapon table. Everything here is plain data so the balance can be unit tested.
+ * The models live in gfx/guns.ts, keyed by the same ids.
  */
 
 export type FireMode = 'semi' | 'auto' | 'burst';
 export type ProjectileKind = 'hitscan' | 'rocket' | 'plasma' | 'cone' | 'grenade';
-
-/** One box of a low-poly view model, in view-model space (metres). */
-export type ModelPart = {
-  size: [number, number, number];
-  pos: [number, number, number];
-  color: number;
-  /** Optional Euler rotation in radians. */
-  rot?: [number, number, number];
-  /** Parts flagged as the slide/bolt animate on fire. */
-  slide?: boolean;
-};
 
 export type WeaponDef = {
   id: string;
@@ -51,17 +40,8 @@ export type WeaponDef = {
   /** Audio character. */
   voice: { freq: number; noise: number; decay: number; body: number };
   tracer: number;
-  parts: ModelPart[];
-  /** Muzzle position in view-model space, for flash + tracer origin. */
-  muzzle: [number, number, number];
 };
 
-const GUNMETAL = 0x6b7178;
-const DARKMETAL = 0x51565b;
-const WOOD = 0xd19464;
-const BRASS = 0xb08d3a;
-const RUST = 0xe9845c;
-const PLASTIC = 0x838b94;
 const GLOW = 0x54ffd5;
 
 export const WEAPONS: Record<string, WeaponDef> = {
@@ -72,12 +52,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 3.2, headMult: 1.2, splashRadius: 0, splashDamage: 0,
     kick: 0.01, shake: 0.2, wallCost: 0, ammoCost: 0, boxWeight: 0,
     voice: { freq: 180, noise: 0.8, decay: 0.09, body: 0.2 }, tracer: 0,
-    muzzle: [0, 0, -0.5],
-    parts: [
-      { size: [0.05, 0.16, 0.5], pos: [0, 0, -0.26], color: 0xc9d1d9 },
-      { size: [0.09, 0.1, 0.24], pos: [0, -0.02, 0.1], color: 0x836953 },
-      { size: [0.16, 0.05, 0.06], pos: [0, 0.01, -0.02], color: BRASS },
-    ],
   },
 
   sidearm: {
@@ -87,13 +61,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 90, headMult: 2.2, splashRadius: 0, splashDamage: 0,
     kick: 0.026, shake: 0.5, wallCost: 0, ammoCost: 250, boxWeight: 0,
     voice: { freq: 300, noise: 0.55, decay: 0.16, body: 0.7 }, tracer: 0xffe08a,
-    muzzle: [0, 0.03, -0.55],
-    parts: [
-      { size: [0.1, 0.11, 0.62], pos: [0, 0.05, -0.2], color: GUNMETAL, slide: true },
-      { size: [0.08, 0.1, 0.5], pos: [0, -0.04, -0.16], color: DARKMETAL },
-      { size: [0.1, 0.3, 0.14], pos: [0, -0.2, 0.08], color: 0x7b6150, rot: [0.22, 0, 0] },
-      { size: [0.03, 0.04, 0.05], pos: [0, 0.12, -0.46], color: 0x7c848c },
-    ],
   },
 
   boomstick: {
@@ -103,13 +70,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 34, headMult: 1.5, splashRadius: 0, splashDamage: 0,
     kick: 0.085, shake: 2.4, wallCost: 1200, ammoCost: 600, boxWeight: 8,
     voice: { freq: 120, noise: 0.95, decay: 0.34, body: 1 }, tracer: 0xffc266,
-    muzzle: [0, 0.02, -0.95],
-    parts: [
-      { size: [0.16, 0.09, 1.1], pos: [0, 0.04, -0.42], color: DARKMETAL },
-      { size: [0.2, 0.14, 0.44], pos: [0, -0.01, 0.16], color: WOOD },
-      { size: [0.11, 0.26, 0.13], pos: [0, -0.2, 0.3], color: WOOD, rot: [0.3, 0, 0] },
-      { size: [0.18, 0.03, 0.5], pos: [0, 0.1, -0.6], color: 0xa67c58 },
-    ],
   },
 
   trench: {
@@ -119,14 +79,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 60, headMult: 1.6, splashRadius: 0, splashDamage: 0,
     kick: 0.019, shake: 0.55, wallCost: 1400, ammoCost: 700, boxWeight: 10,
     voice: { freq: 250, noise: 0.7, decay: 0.12, body: 0.6 }, tracer: 0xffd27a,
-    muzzle: [0, 0.03, -0.78],
-    parts: [
-      { size: [0.1, 0.12, 0.9], pos: [0, 0.03, -0.3], color: GUNMETAL },
-      { size: [0.09, 0.26, 0.11], pos: [0, -0.16, -0.08], color: DARKMETAL },
-      { size: [0.1, 0.28, 0.12], pos: [0, -0.18, 0.24], color: WOOD, rot: [0.26, 0, 0] },
-      { size: [0.2, 0.09, 0.3], pos: [0, -0.02, 0.28], color: WOOD },
-      { size: [0.06, 0.06, 0.3], pos: [0, 0.11, -0.62], color: 0x464b50 },
-    ],
   },
 
   grease: {
@@ -136,13 +88,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 65, headMult: 1.7, splashRadius: 0, splashDamage: 0,
     kick: 0.024, shake: 0.7, wallCost: 1500, ammoCost: 750, boxWeight: 9,
     voice: { freq: 205, noise: 0.72, decay: 0.15, body: 0.75 }, tracer: 0xffcf66,
-    muzzle: [0, 0.02, -0.72],
-    parts: [
-      { size: [0.11, 0.11, 0.8], pos: [0, 0.02, -0.26], color: 0x788088 },
-      { size: [0.08, 0.36, 0.1], pos: [0, -0.22, -0.02], color: DARKMETAL },
-      { size: [0.1, 0.24, 0.11], pos: [0, -0.16, 0.24], color: PLASTIC, rot: [0.24, 0, 0] },
-      { size: [0.05, 0.05, 0.36], pos: [0, 0.1, -0.5], color: 0x505459 },
-    ],
   },
 
   nailrifle: {
@@ -152,15 +97,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 110, headMult: 2.4, splashRadius: 0, splashDamage: 0,
     kick: 0.03, shake: 0.85, wallCost: 1500, ammoCost: 750, boxWeight: 10,
     voice: { freq: 230, noise: 0.62, decay: 0.18, body: 0.85 }, tracer: 0xfff0b0,
-    muzzle: [0, 0.04, -1.0],
-    parts: [
-      { size: [0.1, 0.13, 1.05], pos: [0, 0.03, -0.35], color: 0x707880 },
-      { size: [0.09, 0.3, 0.12], pos: [0, -0.2, -0.1], color: RUST },
-      { size: [0.12, 0.26, 0.14], pos: [0, -0.16, 0.26], color: PLASTIC, rot: [0.24, 0, 0] },
-      { size: [0.22, 0.1, 0.34], pos: [0, 0.0, 0.3], color: 0x5e6368 },
-      { size: [0.07, 0.07, 0.4], pos: [0, 0.11, -0.78], color: 0x484c51 },
-      { size: [0.03, 0.09, 0.05], pos: [0, 0.16, -0.5], color: 0x8b949e },
-    ],
   },
 
   longshot: {
@@ -170,14 +106,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 220, headMult: 3, splashRadius: 0, splashDamage: 0,
     kick: 0.1, shake: 2, wallCost: 1600, ammoCost: 800, boxWeight: 7,
     voice: { freq: 150, noise: 0.6, decay: 0.42, body: 1 }, tracer: 0xfff6d0,
-    muzzle: [0, 0.04, -1.25],
-    parts: [
-      { size: [0.09, 0.1, 1.4], pos: [0, 0.04, -0.5], color: 0x63686c },
-      { size: [0.16, 0.14, 0.9], pos: [0, -0.04, 0.1], color: WOOD },
-      { size: [0.11, 0.26, 0.13], pos: [0, -0.18, 0.34], color: WOOD, rot: [0.2, 0, 0] },
-      { size: [0.08, 0.08, 0.42], pos: [0, 0.17, -0.28], color: 0x464b50 },
-      { size: [0.05, 0.05, 0.14], pos: [0.09, 0.06, 0.05], color: 0x8b949e, rot: [0, 0, 0.5] },
-    ],
   },
 
   scattergun: {
@@ -187,14 +115,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 40, headMult: 1.4, splashRadius: 0, splashDamage: 0,
     kick: 0.055, shake: 1.6, wallCost: 1800, ammoCost: 900, boxWeight: 8,
     voice: { freq: 135, noise: 0.9, decay: 0.26, body: 0.95 }, tracer: 0xffc266,
-    muzzle: [0, 0.02, -0.98],
-    parts: [
-      { size: [0.12, 0.12, 1.1], pos: [0, 0.05, -0.4], color: 0x697076 },
-      { size: [0.14, 0.14, 0.7], pos: [0, -0.06, -0.24], color: 0x585c61 },
-      { size: [0.13, 0.3, 0.14], pos: [0, -0.2, 0.12], color: PLASTIC },
-      { size: [0.12, 0.26, 0.13], pos: [0, -0.16, 0.34], color: PLASTIC, rot: [0.22, 0, 0] },
-      { size: [0.2, 0.06, 0.28], pos: [0, 0.14, -0.2], color: 0x838b94 },
-    ],
   },
 
   ripper: {
@@ -204,16 +124,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 90, headMult: 1.5, splashRadius: 0, splashDamage: 0,
     kick: 0.014, shake: 0.9, wallCost: 0, ammoCost: 0, boxWeight: 6,
     voice: { freq: 190, noise: 0.85, decay: 0.09, body: 0.8 }, tracer: 0xffb84d,
-    muzzle: [0, 0.0, -1.15],
-    parts: [
-      { size: [0.26, 0.26, 1.0], pos: [0, 0.0, -0.5], color: 0x5c6369 },
-      { size: [0.07, 0.07, 1.25], pos: [-0.07, 0.07, -0.6], color: 0x404448 },
-      { size: [0.07, 0.07, 1.25], pos: [0.07, 0.07, -0.6], color: 0x404448 },
-      { size: [0.07, 0.07, 1.25], pos: [0, -0.09, -0.6], color: 0x404448 },
-      { size: [0.34, 0.3, 0.44], pos: [0, -0.02, 0.18], color: 0x707880 },
-      { size: [0.14, 0.3, 0.14], pos: [0, -0.22, 0.34], color: PLASTIC },
-      { size: [0.3, 0.26, 0.3], pos: [0.28, -0.1, 0.2], color: RUST },
-    ],
   },
 
   plasma: {
@@ -223,15 +133,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 140, headMult: 1, splashRadius: 5.5, splashDamage: 300,
     kick: 0.05, shake: 1.5, wallCost: 0, ammoCost: 0, boxWeight: 3,
     voice: { freq: 620, noise: 0.25, decay: 0.3, body: 0.5 }, tracer: GLOW,
-    muzzle: [0, 0.02, -0.95],
-    parts: [
-      { size: [0.16, 0.18, 0.9], pos: [0, 0.03, -0.32], color: 0x69847b },
-      { size: [0.1, 0.1, 0.42], pos: [0, 0.03, -0.86], color: GLOW },
-      { size: [0.26, 0.26, 0.3], pos: [0, 0.06, 0.1], color: 0x546b64 },
-      { size: [0.12, 0.3, 0.13], pos: [0, -0.2, 0.18], color: 0x495b56 },
-      { size: [0.06, 0.2, 0.2], pos: [0.13, 0.12, -0.1], color: GLOW },
-      { size: [0.06, 0.2, 0.2], pos: [-0.13, 0.12, -0.1], color: GLOW },
-    ],
   },
 
   hellfire: {
@@ -241,14 +142,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 200, headMult: 1, splashRadius: 8, splashDamage: 650,
     kick: 0.11, shake: 3, wallCost: 0, ammoCost: 0, boxWeight: 4,
     voice: { freq: 110, noise: 0.8, decay: 0.5, body: 1 }, tracer: 0xff7a2a,
-    muzzle: [0, 0.04, -1.1],
-    parts: [
-      { size: [0.2, 0.2, 1.5], pos: [0, 0.06, -0.4], color: 0x7b8c6c },
-      { size: [0.14, 0.14, 0.4], pos: [0, 0.06, -1.05], color: 0xb33b1e },
-      { size: [0.1, 0.28, 0.12], pos: [0, -0.16, 0.16], color: 0x58604c },
-      { size: [0.24, 0.06, 0.3], pos: [0, 0.2, -0.1], color: 0x5e6953 },
-      { size: [0.05, 0.14, 0.05], pos: [0.08, 0.2, -0.5], color: 0x8b949e },
-    ],
   },
 
   thunder: {
@@ -258,15 +151,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 22, headMult: 1, splashRadius: 0, splashDamage: 0,
     kick: 0.13, shake: 4, wallCost: 0, ammoCost: 0, boxWeight: 2,
     voice: { freq: 70, noise: 0.9, decay: 0.7, body: 1 }, tracer: 0x9fd8ff,
-    muzzle: [0, 0.0, -1.0],
-    parts: [
-      { size: [0.3, 0.3, 0.7], pos: [0, 0.02, -0.2], color: 0x838b9c },
-      { size: [0.44, 0.44, 0.34], pos: [0, 0.02, -0.68], color: 0xb3c0e9 },
-      { size: [0.52, 0.52, 0.1], pos: [0, 0.02, -0.86], color: 0x9fd8ff },
-      { size: [0.12, 0.3, 0.13], pos: [0, -0.2, 0.12], color: 0x606671 },
-      { size: [0.1, 0.1, 0.5], pos: [0.19, 0.16, -0.3], color: 0x9fd8ff },
-      { size: [0.1, 0.1, 0.5], pos: [-0.19, 0.16, -0.3], color: 0x9fd8ff },
-    ],
   },
 
   frag: {
@@ -276,11 +160,6 @@ export const WEAPONS: Record<string, WeaponDef> = {
     range: 40, headMult: 1, splashRadius: 8.5, splashDamage: 850,
     kick: 0.02, shake: 0.3, wallCost: 250, ammoCost: 250, boxWeight: 0,
     voice: { freq: 90, noise: 0.9, decay: 0.6, body: 1 }, tracer: 0,
-    muzzle: [0, 0, -0.4],
-    parts: [
-      { size: [0.22, 0.28, 0.22], pos: [0, -0.02, -0.15], color: 0x869c6c },
-      { size: [0.1, 0.08, 0.1], pos: [0, 0.16, -0.15], color: 0x8b949e },
-    ],
   },
 };
 

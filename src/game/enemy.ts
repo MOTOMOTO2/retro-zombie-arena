@@ -11,12 +11,15 @@
 import * as THREE from 'three';
 import { NavGrid } from '../world/grid.ts';
 import { TILE, tileCenter, worldToTile } from '../world/mapdata.ts';
-import { buildHound, buildZombie, type ZombieModel } from '../gfx/models.ts';
+import { buildHound, buildZombie, type Outfit, type ZombieModel } from '../gfx/models.ts';
 import { Rng } from '../core/rng.ts';
 import { enemyDamage, enemySpeed, type EnemyKind } from './rules.ts';
 import type { BarricadeProp } from '../world/props.ts';
 
 export type EnemyState = 'idle' | 'approach' | 'breach' | 'climb' | 'hunt' | 'attack' | 'dead';
+
+/** Where a zombie stands to tear boards: inside the window reveal, near the outer face. */
+const WINDOW_STAND = 0.5;
 
 export type HitResult = {
   killed: boolean;
@@ -52,6 +55,8 @@ export class Enemy {
   private lastDist = 0;
   private velX = 0;
   private velZ = 0;
+  /** 1 on the frame a bullet lands, fading to 0; the renderer brightens the body with it. */
+  hitFlash = 0;
 
   constructor(model: ZombieModel) {
     this.model = model;
@@ -83,6 +88,7 @@ export class Enemy {
     this.lastDist = 1e9;
     this.velX = 0;
     this.velZ = 0;
+    this.hitFlash = 0;
     this.model.root.visible = true;
     this.model.root.position.set(x, 0, z);
     this.model.root.rotation.set(0, 0, 0);
@@ -111,6 +117,7 @@ export class Enemy {
     if (this.state === 'dead') return { killed: false, head, gibbed: false, damageDealt: 0 };
     const before = this.health;
     this.health -= amount;
+    this.hitFlash = 1;
     const dealt = Math.min(before, amount);
     if (this.health > 0) {
       return { killed: false, head, gibbed: false, damageDealt: dealt };
@@ -131,6 +138,7 @@ export class Enemy {
     onGroan: (e: Enemy) => void,
   ): void {
     if (!this.active) return;
+    this.hitFlash = Math.max(0, this.hitFlash - dt * 9);
 
     if (this.state === 'dead') {
       this.deadTimer -= dt;
@@ -170,7 +178,7 @@ export class Enemy {
     this.animate(dt);
   }
 
-  /** Walk from the outside spawn point up to the window. */
+  /** Walk from the outside spawn point into the window reveal. */
   private updateApproach(dt: number): void {
     const b = this.target;
     if (!b) {
@@ -178,8 +186,8 @@ export class Enemy {
       return;
     }
     const outside = {
-      x: b.center.x + b.def.dx * TILE * 0.85,
-      z: b.center.z + b.def.dz * TILE * 0.85,
+      x: b.center.x + b.def.dx * WINDOW_STAND,
+      z: b.center.z + b.def.dz * WINDOW_STAND,
     };
     const dx = outside.x - this.x;
     const dz = outside.z - this.z;
@@ -230,8 +238,8 @@ export class Enemy {
     };
     const t = Math.min(1, this.stateTimer / 1.15);
     const from = {
-      x: b.center.x + b.def.dx * TILE * 0.85,
-      z: b.center.z + b.def.dz * TILE * 0.85,
+      x: b.center.x + b.def.dx * WINDOW_STAND,
+      z: b.center.z + b.def.dz * WINDOW_STAND,
     };
     this.x = from.x + (inside.x - from.x) * t;
     this.z = from.z + (inside.z - from.z) * t;
@@ -363,12 +371,13 @@ export class Enemy {
       const c = Math.cos(this.phase);
       m.legL.rotation.x = s * swingAmp;
       m.legR.rotation.x = -s * swingAmp;
-      // The lurch: shoulders roll opposite the hips, head lolls behind.
+      // The lurch: hunched forward, shoulders rolling opposite the hips,
+      // head lolling but still fixed on whatever it is chasing.
       m.body.rotation.z = c * 0.09;
-      m.body.rotation.x = -0.13 + Math.abs(s) * 0.05;
+      m.body.rotation.x = 0.22 + Math.abs(s) * 0.06;
       m.body.position.y = 1.5 + Math.abs(s) * 0.08;
       m.head.rotation.z = -c * 0.16;
-      m.head.rotation.x = 0.12 + s * 0.05;
+      m.head.rotation.x = -0.18 + s * 0.05;
       m.armL.rotation.z = c * 0.1;
       m.armR.rotation.z = -c * 0.1;
       m.jaw.rotation.x = 0.16 + Math.abs(c) * 0.2;
@@ -384,7 +393,7 @@ export class Enemy {
       } else {
         m.armL.rotation.x = -1.32 - a * 1.5;
         m.armR.rotation.x = -1.32 - a * 1.5;
-        m.body.rotation.x = -0.13 - a * 0.25;
+        m.body.rotation.x = 0.22 + a * 0.3;
       }
     }
 
@@ -401,12 +410,15 @@ export class EnemyPool {
   readonly group = new THREE.Group();
 
   constructor(humanoids = 30, hounds = 12) {
+    const outfits: Outfit[] = ['patient', 'civilian', 'orderly', 'patient', 'guard', 'civilian'];
     for (let i = 0; i < humanoids; i++) {
       const model = buildZombie({
         skin: i % 4,
         damage: i % 5,
         tall: 0.92 + (i % 7) * 0.026,
         wide: 0.94 + (i % 5) * 0.03,
+        outfit: outfits[i % outfits.length],
+        cloth: i % 7,
       });
       const e = new Enemy(model);
       this.all.push(e);

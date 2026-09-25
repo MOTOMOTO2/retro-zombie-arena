@@ -63,6 +63,7 @@ const browser = await chromium.launch({
     '--use-angle=swiftshader',
     '--enable-unsafe-swiftshader',
     '--disable-gpu-sandbox',
+    '--autoplay-policy=no-user-gesture-required',
   ],
 });
 
@@ -119,7 +120,7 @@ try {
     };
   });
 
-  check('renders at a low internal resolution', frame.height <= 260, `${frame.width}x${frame.height}`);
+  check('renders at a low internal resolution', frame.height <= 540 && frame.height < 720, `${frame.width}x${frame.height}`);
   check('frame is not blank', frame.max > 40 && frame.litFraction > 0.25,
     `lit ${(frame.litFraction * 100).toFixed(0)}%, mean ${frame.mean.toFixed(1)}, max ${frame.max}`);
   check('frame has tonal range (lighting works)', frame.max - frame.min > 60,
@@ -172,16 +173,16 @@ try {
     game.player.award(60000);
     const before = game.player.points;
 
-    // Stand in front of the furnace-hall door and buy it.
-    const door = game.props.doors.find((d) => d.def.id === 'd_furnace');
-    game.player.x = door.center.x + 3.2;
-    game.player.z = door.center.z;
-    game.player.yaw = Math.PI / 2;
+    // Buy the first door out of the start room.
+    const start = game.layout.spawnZone;
+    const door = game.props.doors.find((d) => d.def.connects.includes(start));
+    const beyond = door.def.connects.find((z) => z !== start);
+    out.onlyStartOpenAtFirst = game.openZones.size === 1 && game.openZones.has(start);
     game.update(1 / 60);
     game.buyDoor(door);
     out.doorOpened = door.open;
     out.doorCostPaid = before - game.player.points === door.def.cost;
-    out.zoneUnlocked = game.openZones.has('furnace');
+    out.zoneUnlocked = game.openZones.has(beyond);
     out.tileWalkable = !game.grid.solid(door.def.rect.x, door.def.rect.z);
 
     // Buy a wall weapon.
@@ -234,10 +235,25 @@ try {
   const gunplay = await page.evaluate(() => {
     const { game } = window.__RZA;
     const out = {};
-    game.newRun();
+    game.newRun(4242);
     game.input.locked = true;
     game.player.giveWeapon('trench');
     game.viewmodel.equip(game.player.slot.id);
+
+    // Stand at the west edge of the start room on a row with a clear run east
+    // (no pillars, no props in the way), so the shots have a clean line.
+    const home = game.layout.zones.find((z) => z.id === game.layout.spawnZone);
+    let lane = home.rect.z + 1;
+    const clear = (row) => {
+      for (let x = home.rect.x; x < home.rect.x + 6; x++) if (game.layout.tiles[row * 56 + x] !== 1) return false;
+      return true;
+    };
+    while (!clear(lane)) lane++;
+    game.player.x = (home.rect.x + 0.5) * 4;
+    game.player.z = (lane + 0.5) * 4;
+    game.player.yaw = -Math.PI / 2;
+    game.player.pitch = 0;
+    game.pool.reset();
 
     // Line a few walkers up straight ahead and hold the trigger down.
     const fx = -Math.sin(game.player.yaw);
@@ -279,19 +295,35 @@ try {
     // Bullets must not pass through walls: face one and shoot it.
     game.newRun();
     game.input.locked = true;
+    game.pool.reset();
     game.player.giveWeapon('trench');
     game.viewmodel.equip(game.player.slot.id);
-    game.player.x = 18.5 * 4;
-    game.player.z = 34.5 * 4;
-    game.player.yaw = -Math.PI / 2; // straight at the lobby's west wall
+    const L = game.layout;
+    const room = L.zones.find((z) => z.id === L.spawnZone);
+    let row = room.rect.z + 1;
+    while (L.tiles[row * 56 + room.rect.x - 1] !== 2) row++;
+    game.player.x = (room.rect.x + 0.5) * 4;
+    game.player.z = (row + 0.5) * 4;
+    game.player.yaw = Math.PI / 2; // forward is (-sin, -cos): straight at the west wall
+    game.player.pitch = 0;
     const behind = game.pool.acquire('walker');
-    behind.spawn('walker', 15 * 4, 34.5 * 4, 400, 3, null, game.rng);
+    behind.spawn('walker', (room.rect.x - 2.5) * 4, (row + 0.5) * 4, 400, 3, null, game.rng);
     behind.state = 'hunt';
     const hpBefore = behind.health;
     game.input.fire = true;
     for (let i = 0; i < 40; i++) game.update(1 / 60);
     game.input.fire = false;
     out.wallsStopBullets = behind.health === hpBefore;
+    // ...and the same shots do land when nothing is in the way. (The old
+    // version of this check faced away from the wall, so it could not fail.)
+    game.player.slot.mag = 30;
+    game.player.x += 12;
+    behind.x = game.player.x - 9;
+    behind.z = game.player.z;
+    game.input.fire = true;
+    for (let i = 0; i < 40; i++) game.update(1 / 60);
+    game.input.fire = false;
+    out.sameShotsHitInOpen = behind.health < hpBefore || behind.state === 'dead';
 
     // Grenades must be bought before they can be thrown.
     game.newRun();
@@ -364,14 +396,113 @@ try {
   check('the run reports stats', death.over !== null && typeof death.over.round === 'number');
   check('the game-over screen shows', death.gameoverVisible === true);
 
+  // ------------------------------------------------------- random asylums
+  const maps = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const info = game.retro.renderer.info;
+    const seeds = [];
+    const shapes = new Set();
+    let geoAfter2 = 0;
+    for (let i = 0; i < 6; i++) {
+      game.newRun();
+      seeds.push(game.seed);
+      shapes.add(Array.from(game.layout.tiles).join(''));
+      for (let k = 0; k < 5; k++) game.update(1 / 60);
+      game.render();
+      if (i === 1) geoAfter2 = info.memory.geometries;
+    }
+    const geoAfter6 = info.memory.geometries;
+    game.newRun(123456);
+    const a = Array.from(game.layout.tiles).join('');
+    const nameA = game.currentZoneName;
+    game.newRun(123456);
+    const b = Array.from(game.layout.tiles).join('');
+    return {
+      distinct: shapes.size, seeds, geoAfter2, geoAfter6,
+      replay: a === b && game.seed === 123456, nameA,
+      inStartRoom: game.currentZoneName !== 'CORRIDOR',
+    };
+  });
+  check('every run gets a different asylum', maps.distinct === 6, `seeds ${maps.seeds.join(', ')}`);
+  check('a seed replays the same asylum', maps.replay);
+  check('the player wakes up inside the start room', maps.inStartRoom, maps.nameA);
+  check('rebuilding the world does not leak GPU memory', maps.geoAfter6 - maps.geoAfter2 < 60,
+    `geometries ${maps.geoAfter2} -> ${maps.geoAfter6}`);
+
+  // ------------------------------------------------------ weapons in hand
+  const arms = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    game.newRun(4242);
+    game.input.locked = true;
+    game.pool.reset();
+    game.roundPhase = 'clear';
+    game.phaseTimer = 999;
+    const ids = ['sidearm', 'boomstick', 'trench', 'grease', 'nailrifle', 'longshot', 'scattergun', 'ripper', 'plasma', 'hellfire', 'thunder'];
+    const events = [];
+    const vm = game.viewmodel;
+    const prev = vm.onEvent;
+    vm.onEvent = (e) => { events.push(e); prev(e); };
+    const bad = [];
+    for (const id of ids) {
+      game.player.slots = [{ id, mag: 0, reserve: 400, packed: false }];
+      game.player.activeSlot = 0;
+      game.equipCurrent();
+      for (let i = 0; i < 30; i++) game.update(1 / 60);
+      const before = events.length;
+      if (!game.startReload()) { bad.push(`${id}: reload refused`); continue; }
+      for (let i = 0; i < 60 * 12 && (game.player.reloading || vm.busyPose !== 'idle'); i++) game.update(1 / 60);
+      for (let i = 0; i < 60; i++) game.update(1 / 60);
+      if (game.player.slot.mag === 0) bad.push(`${id}: never refilled`);
+      if (vm.busyPose !== 'idle') bad.push(`${id}: stuck in ${vm.busyPose}`);
+      if (events.length === before) bad.push(`${id}: silent reload`);
+    }
+    // The scoped rifle hides the gun and shows the scope when aimed.
+    game.player.slots = [{ id: 'longshot', mag: 5, reserve: 40, packed: false }];
+    game.equipCurrent();
+    game.input.aim = true;
+    for (let i = 0; i < 60; i++) game.update(1 / 60);
+    const scoped = vm.scopeView && document.getElementById('scope').classList.contains('show');
+    game.input.aim = false;
+    for (let i = 0; i < 30; i++) game.update(1 / 60);
+    const unscoped = !vm.scopeView && !document.getElementById('scope').classList.contains('show');
+    // Pack-a-Punch camo builds and renders.
+    game.player.slot.packed = true;
+    game.equipCurrent();
+    game.render();
+    vm.onEvent = prev;
+    return { bad, scoped, unscoped, kinds: [...new Set(events)].length };
+  });
+  check('every weapon reloads all the way through its animation', arms.bad.length === 0, arms.bad.join(' | '));
+  check('reloads cue their own foley', arms.kinds >= 12, `${arms.kinds} distinct cues`);
+  check('the scoped rifle shows its scope when aimed', arms.scoped && arms.unscoped);
+
+  // ------------------------------------------------------- zombie voices
+  const voices = await page.evaluate(async () => {
+    const { audio } = window.__RZA;
+    await audio.resume();
+    audio.setListener({ x: 0, z: 0 }, 0);
+    for (const kind of ['moan', 'growl', 'snarl', 'scream', 'death']) audio.zombieVoice({ x: 3, z: 0 }, kind, 1);
+    const active = audio.activeVoices;
+    // Flood it: the limiter must hold the line.
+    for (let i = 0; i < 40; i++) audio.zombieVoice({ x: i * 0.5, z: 0 }, 'moan', 1);
+    const capped = audio.activeVoices;
+    for (const m of ['magOut', 'magIn', 'rack', 'breakOpen', 'shellIn', 'pump', 'boltBack', 'cellIn', 'swing']) audio.mech(m);
+    return { active, capped, state: audio.ctx ? audio.ctx.state : 'none' };
+  });
+  check('zombies have voices', voices.active === 5, `${voices.active} sounding, context ${voices.state}`);
+  check('a horde cannot drown the mix', voices.capped <= 7, `${voices.capped} voices after a flood`);
+
   // --------------------------------------------------------- stability
   const perf = await page.evaluate(() => {
     const { game } = window.__RZA;
     game.newRun();
     game.input.locked = true;
-    for (let i = 0; i < 60 * 20; i++) game.update(1 / 60);
+    // Keep the player standing so the horde keeps working for the whole measurement.
+    const live = () => { game.player.health = game.player.maxHealth; };
+    for (let i = 0; i < 60 * 20; i++) { live(); game.update(1 / 60); }
+    const alive = game.pool.liveCount;
     const t0 = performance.now();
-    for (let i = 0; i < 300; i++) game.update(1 / 60);
+    for (let i = 0; i < 300; i++) { live(); game.update(1 / 60); }
     const simMs = (performance.now() - t0) / 300;
     const info = game.retro.renderer.info;
     info.autoReset = false;
@@ -382,11 +513,11 @@ try {
     const calls = info.render.calls / 30;
     const triangles = info.render.triangles / 30;
     info.autoReset = true;
-    return { simMs, drawMs, calls, triangles, geometries: info.memory.geometries };
+    return { simMs, drawMs, calls, triangles, geometries: info.memory.geometries, alive, state: game.state };
   });
 
   check('geometry is on the GPU', perf.triangles > 1000, `${perf.triangles} tris, ${perf.calls} draw calls`);
-  check('simulation step is cheap', perf.simMs < 8, `${perf.simMs.toFixed(2)} ms/step`);
+  check('simulation step is cheap', perf.simMs < 8 && perf.state === 'playing', `${perf.simMs.toFixed(3)} ms/step with ${perf.alive} zombies alive`);
   check('software-rendered frame completes', perf.drawMs < 2000, `${perf.drawMs.toFixed(1)} ms/frame (swiftshader)`);
 
   check('no uncaught page errors during play', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));

@@ -4,10 +4,12 @@
 
 import './style.css';
 import { audio } from './core/audio.ts';
-import { QUALITY_PRESETS, type RetroQuality } from './core/retro.ts';
+import { DEFAULT_QUALITY, QUALITY_PRESETS, type RetroQuality } from './core/retro.ts';
 import { Game, type GameState, type RunStats } from './game/game.ts';
 
-const SETTINGS_KEY = 'rza.settings.v1';
+const SETTINGS_KEY = 'rza.settings.v2';
+/** v1 predates the colour-correct renderer; its quality pick is not carried over. */
+const LEGACY_SETTINGS_KEY = 'rza.settings.v1';
 const BEST_KEY = 'rza.best.v1';
 
 type Settings = {
@@ -16,15 +18,22 @@ type Settings = {
   volume: number;
   invertY: boolean;
   fov: number;
+  brightness: number;
 };
 
 const DEFAULTS: Settings = {
-  quality: 'dos',
+  quality: DEFAULT_QUALITY,
   sensitivity: 22,
   volume: 70,
   invertY: false,
   fov: 80,
+  brightness: 50,
 };
+
+/** Maps the 0..100 brightness slider to a linear exposure, 50 being neutral. */
+function exposureFor(brightness: number): number {
+  return Math.pow(2, (brightness - 50) / 30);
+}
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -35,8 +44,23 @@ function el<T extends HTMLElement>(id: string): T {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    if (raw) {
+      const s = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+      if (!QUALITY_PRESETS[s.quality]) s.quality = DEFAULT_QUALITY;
+      return s;
+    }
+    const legacy = localStorage.getItem(LEGACY_SETTINGS_KEY);
+    if (legacy) {
+      const old = JSON.parse(legacy) as Partial<Settings>;
+      return {
+        ...DEFAULTS,
+        sensitivity: old.sensitivity ?? DEFAULTS.sensitivity,
+        volume: old.volume ?? DEFAULTS.volume,
+        invertY: old.invertY ?? DEFAULTS.invertY,
+        fov: old.fov ?? DEFAULTS.fov,
+      };
+    }
+    return { ...DEFAULTS };
   } catch {
     return { ...DEFAULTS };
   }
@@ -120,21 +144,25 @@ function boot(): void {
   const volInput = el<HTMLInputElement>('opt-vol');
   const invertInput = el<HTMLInputElement>('opt-invert');
   const fovInput = el<HTMLInputElement>('opt-fov');
+  const brightInput = el<HTMLInputElement>('opt-bright');
 
   const applySettings = (): void => {
     game.setQuality(QUALITY_PRESETS[settings.quality] as RetroQuality);
     game.input.sensitivity = settings.sensitivity / 10000;
     game.input.invertY = settings.invertY;
     game.setFov(settings.fov);
+    game.retro.setExposure(exposureFor(settings.brightness));
     audio.setVolume(settings.volume / 100);
     el('val-sens').textContent = (settings.sensitivity / 10).toFixed(1);
     el('val-vol').textContent = String(settings.volume);
     el('val-fov').textContent = String(settings.fov);
+    el('val-bright').textContent = String(settings.brightness);
     qualitySel.value = settings.quality;
     sensInput.value = String(settings.sensitivity);
     volInput.value = String(settings.volume);
     invertInput.checked = settings.invertY;
     fovInput.value = String(settings.fov);
+    brightInput.value = String(settings.brightness);
     saveSettings(settings);
   };
 
@@ -156,6 +184,10 @@ function boot(): void {
   });
   fovInput.addEventListener('input', () => {
     settings.fov = Number(fovInput.value);
+    applySettings();
+  });
+  brightInput.addEventListener('input', () => {
+    settings.brightness = Number(brightInput.value);
     applySettings();
   });
 

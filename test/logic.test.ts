@@ -2,27 +2,25 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import {
-  BARRICADES,
-  BOX_PADS,
-  DOORS,
+  MAP_H,
   MAP_W,
-  PERKS,
-  PLAYER_SPAWN,
-  POWER_SWITCH,
   TILE,
   T_BARRICADE,
   T_DOOR,
   T_FLOOR,
+  T_VOID,
   T_WALL,
-  WALL_BUYS,
-  ZONES,
-  buildTileMap,
+  type Layout,
+  facingNormal,
+  floodFloor,
+  generateLayout,
   tileCenter,
+  validateLayout,
   worldToTile,
   zoneAt,
 } from '../src/world/mapdata.ts';
 import { NavGrid } from '../src/world/grid.ts';
-import { PACK_TILE } from '../src/world/props.ts';
+import { GUN_IDS } from '../src/gfx/guns.ts';
 import { Rng } from '../src/core/rng.ts';
 import {
   BOX_POOL,
@@ -48,103 +46,88 @@ import {
   spawnInterval,
 } from '../src/game/rules.ts';
 
-describe('arena layout', () => {
-  const map = buildTileMap();
-  const grid = new NavGrid(map);
+/** Every generated asylum must pass every rule; sweep a few hundred of them. */
+const SEEDS = Array.from({ length: 300 }, (_, i) => i + 1);
 
-  it('has a floor tile under the player spawn', () => {
-    assert.equal(map[PLAYER_SPAWN.tz * MAP_W + PLAYER_SPAWN.tx], T_FLOOR);
-  });
-
-  it('puts every barricade on a wall-line tile with floor inside it', () => {
-    for (const b of BARRICADES) {
-      assert.equal(map[b.tz * MAP_W + b.tx], T_BARRICADE, `${b.id} is not a barricade tile`);
-      const inside = map[(b.tz - b.dz) * MAP_W + (b.tx - b.dx)];
-      assert.equal(inside, T_FLOOR, `${b.id} does not open into the room`);
+describe('generated arenas', () => {
+  it('passes every placement and connectivity rule for 300 seeds', () => {
+    for (const seed of SEEDS) {
+      const errs = validateLayout(generateLayout(seed));
+      assert.deepEqual(errs, [], `seed ${seed}: ${errs.join('; ')}`);
     }
   });
 
-  it('hangs every wall buy on a real wall', () => {
-    for (const w of WALL_BUYS) {
-      assert.ok(WEAPONS[w.weapon], `wall buy references unknown weapon ${w.weapon}`);
-      assert.equal(map[w.tz * MAP_W + w.tx], T_FLOOR, `${w.weapon} pad is not floor`);
-      const nx = Math.round(Math.sin(w.facing));
-      const nz = Math.round(Math.cos(w.facing));
-      assert.equal(
-        map[(w.tz - nz) * MAP_W + (w.tx - nx)],
-        T_WALL,
-        `${w.weapon} has no wall behind it`,
-      );
+  it('is deterministic: the same seed builds the same asylum', () => {
+    const a = generateLayout(777);
+    const b = generateLayout(777);
+    assert.deepEqual(Array.from(a.tiles), Array.from(b.tiles));
+    assert.deepEqual(a.zones.map((z) => z.name), b.zones.map((z) => z.name));
+    assert.deepEqual(a.wallBuys, b.wallBuys);
+  });
+
+  it('actually varies from run to run', () => {
+    const shapes = new Set<string>();
+    const starts = new Set<string>();
+    for (const seed of SEEDS.slice(0, 60)) {
+      const L = generateLayout(seed);
+      shapes.add(Array.from(L.tiles).join(''));
+      starts.add(L.zones.find((z) => z.id === L.spawnZone)?.theme ?? '');
+    }
+    assert.equal(shapes.size, 60, 'two seeds produced the same map');
+    assert.ok(starts.size >= 3, 'the start room is always the same kind');
+  });
+
+  it('builds six to eight themed rooms with at least one loop', () => {
+    for (const seed of SEEDS.slice(0, 100)) {
+      const L = generateLayout(seed);
+      assert.ok(L.zones.length >= 6 && L.zones.length <= 8, `seed ${seed}: ${L.zones.length} rooms`);
+      // A spanning tree has rooms - 1 corridors; anything more is a loop to train in.
+      assert.ok(L.corridors.length >= L.zones.length, `seed ${seed} has no loop`);
+      assert.equal(new Set(L.zones.map((z) => z.name)).size, L.zones.length, 'duplicate room names');
+      assert.equal(L.zones.find((z) => z.id === L.powerZone)?.theme, 'generator');
     }
   });
 
-  it('stands every machine and pad on open floor', () => {
-    const props = [
-      ...PERKS.map((p) => ({ what: p.perk, tx: p.tx, tz: p.tz })),
-      ...BOX_PADS.map((p) => ({ what: 'box', tx: p.tx, tz: p.tz })),
-      { what: 'power', tx: POWER_SWITCH.tx, tz: POWER_SWITCH.tz },
-      { what: 'pack-a-punch', tx: PACK_TILE.tx, tz: PACK_TILE.tz },
-    ];
-    for (const p of props) {
-      assert.equal(map[p.tz * MAP_W + p.tx], T_FLOOR, `${p.what} is inside geometry`);
-    }
-  });
-
-  it('gives every door open floor on both faces', () => {
-    for (const d of DOORS) {
-      assert.equal(map[d.rect.z * MAP_W + d.rect.x], T_DOOR, `${d.id} is not a door tile`);
-      const nx = d.axis === 'z' ? 1 : 0;
-      const nz = d.axis === 'z' ? 0 : 1;
-      const before = map[(d.rect.z - nz) * MAP_W + (d.rect.x - nx)];
-      const after = map[(d.rect.z + nz * d.rect.h) * MAP_W + (d.rect.x + nx * d.rect.w)];
-      assert.equal(before, T_FLOOR, `${d.id} front face is blocked`);
-      assert.equal(after, T_FLOOR, `${d.id} back face is blocked`);
-    }
-  });
-
-  it('seals the spawn room until a door is bought', () => {
-    const reach = grid.reachable(PLAYER_SPAWN.tx, PLAYER_SPAWN.tz);
-    for (const t of reach) {
-      const zone = zoneAt(t % MAP_W, Math.floor(t / MAP_W));
-      assert.ok(zone === 'lobby' || zone === null, 'spawn room leaks into another zone');
-    }
-  });
-
-  it('opens up the whole asylum once every door is bought', () => {
-    const open = new NavGrid(map);
-    for (const d of DOORS) {
-      for (let z = d.rect.z; z < d.rect.z + d.rect.h; z++) {
-        for (let x = d.rect.x; x < d.rect.x + d.rect.w; x++) open.set(x, z, T_FLOOR);
+  it('keeps the space outside every window clear for the dead to walk in', () => {
+    for (const seed of SEEDS.slice(0, 100)) {
+      const L = generateLayout(seed);
+      for (const b of L.barricades) {
+        for (let step = 1; step <= 3; step++) {
+          const t = L.tiles[(b.tz + b.dz * step) * MAP_W + (b.tx + b.dx * step)];
+          assert.equal(t, T_VOID, `seed ${seed} ${b.id}: something outside at step ${step}`);
+        }
       }
     }
-    const reach = open.reachable(PLAYER_SPAWN.tx, PLAYER_SPAWN.tz);
-    for (const zone of ZONES) {
-      const c = {
-        x: zone.rect.x + (zone.rect.w >> 1),
-        z: zone.rect.z + (zone.rect.h >> 1),
-      };
-      assert.ok(reach.has(c.z * MAP_W + c.x), `${zone.id} is unreachable with all doors open`);
-    }
-    for (const w of WALL_BUYS) {
-      assert.ok(reach.has(w.tz * MAP_W + w.tx), `${w.weapon} wall buy is unreachable`);
-    }
-    for (const p of PERKS) {
-      assert.ok(reach.has(p.tz * MAP_W + p.tx), `${p.perk} machine is unreachable`);
+  });
+
+  it('prices doors by how deep into the asylum they lead', () => {
+    for (const seed of SEEDS.slice(0, 100)) {
+      const L = generateLayout(seed);
+      for (const d of L.doors) {
+        assert.ok(d.cost >= 750 && d.cost <= 1500 && d.cost % 250 === 0, `seed ${seed} ${d.id} costs ${d.cost}`);
+        if (d.connects.includes(L.spawnZone)) assert.ok(d.cost <= 1000, `seed ${seed}: first door costs ${d.cost}`);
+      }
     }
   });
 
-  it('backs the power switch and Pack-a-Punch onto a wall', () => {
-    for (const m of [POWER_SWITCH, PACK_TILE]) {
-      const nx = Math.round(Math.sin(m.facing));
-      const nz = Math.round(Math.cos(m.facing));
-      assert.equal(map[(m.tz - nz) * MAP_W + (m.tx - nx)], T_WALL);
-    }
-  });
-
-  it('spawns every window from outside the shell', () => {
-    for (const b of BARRICADES) {
-      const outside = map[(b.tz + b.dz) * MAP_W + (b.tx + b.dx)];
-      assert.notEqual(outside, T_FLOOR, `${b.id} opens into another room`);
+  it('puts the power further from the start than the start room guns', () => {
+    for (const seed of SEEDS.slice(0, 50)) {
+      const L = generateLayout(seed);
+      const open = Uint8Array.from(L.tiles);
+      for (const d of L.doors) {
+        for (let z = d.rect.z; z < d.rect.z + d.rect.h; z++) {
+          for (let x = d.rect.x; x < d.rect.x + d.rect.w; x++) open[z * MAP_W + x] = T_FLOOR;
+        }
+      }
+      const grid = new NavGrid(open);
+      assert.ok(grid.buildFlowField(L.spawn.tx, L.spawn.tz, new Set()));
+      // Measured at the switch: generator rooms can have a pillar in the middle.
+      const power = grid.distanceAt(L.powerSwitch.tx, L.powerSwitch.tz);
+      assert.ok(power > 0, `seed ${seed}: power switch unreachable`);
+      assert.notEqual(L.powerZone, L.spawnZone);
+      for (const w of L.wallBuys.filter((q) => q.zone === L.spawnZone)) {
+        assert.ok(power > grid.distanceAt(w.tx, w.tz), `seed ${seed}: power is closer than the start room`);
+      }
     }
   });
 
@@ -156,64 +139,80 @@ describe('arena layout', () => {
   });
 });
 
+/** A west wall of the start room with plain wall behind it, for the collision tests. */
+function startWall(L: Layout): { tx: number; tz: number; wallTx: number } {
+  const z = L.zones.find((q) => q.id === L.spawnZone);
+  if (!z) throw new Error('no start zone');
+  for (let tz = z.rect.z + 1; tz < z.rect.z + z.rect.h - 1; tz++) {
+    const tx = z.rect.x;
+    if (L.tiles[tz * MAP_W + tx] === T_FLOOR && L.tiles[tz * MAP_W + tx - 1] === T_WALL) return { tx, tz, wallTx: tx - 1 };
+  }
+  throw new Error('start room has no plain west wall');
+}
+
 describe('collision and pathing', () => {
-  const grid = new NavGrid(buildTileMap());
+  const L = generateLayout(4242);
+  const grid = new NavGrid(L.tiles);
+  const wall = startWall(L);
 
   it('pushes a body out of a wall instead of letting it through', () => {
-    // Just inside the lobby's west wall (tile 17 is solid at z=34, tile 18 is floor).
-    const wallFace = 18 * TILE;
+    const wallFace = wall.tx * TILE;
     const r = 0.55;
-    const res = grid.resolveCircle(wallFace - 0.2, 34.5 * TILE, r);
+    const res = grid.resolveCircle(wallFace - 0.2, (wall.tz + 0.5) * TILE, r);
     assert.ok(res.hitWall, 'expected a wall contact');
     assert.ok(res.x >= wallFace - 1e-6, `body ended inside the wall at x=${res.x}`);
   });
 
   it('leaves a body in open space untouched', () => {
-    const c = tileCenter(24, 31);
+    const c = tileCenter(L.spawn.tx, L.spawn.tz);
     const res = grid.resolveCircle(c.x, c.z, 0.55);
     assert.equal(res.hitWall, false);
     assert.ok(Math.abs(res.x - c.x) < 1e-9 && Math.abs(res.z - c.z) < 1e-9);
   });
 
   it('stops a raycast at the first solid tile', () => {
-    const from = tileCenter(24, 34);
+    const from = tileCenter(wall.tx + 1, wall.tz);
     const hit = grid.raycast(from.x, from.z, -1, 0, 200);
     assert.ok(hit.hit, 'ray should have hit the west wall');
-    // Wall face of tile 17 on its +x side.
-    assert.equal(hit.tx, 17);
-    assert.ok(Math.abs(hit.x - 18 * TILE) < 0.001, `hit at x=${hit.x}`);
+    assert.equal(hit.tx, wall.wallTx);
+    assert.ok(Math.abs(hit.x - wall.tx * TILE) < 0.001, `hit at x=${hit.x}`);
     assert.equal(hit.nx, 1);
   });
 
   it('reports line of sight honestly', () => {
-    const a = tileCenter(20, 27);
-    const b = tileCenter(27, 34);
+    const z = L.zones.find((q) => q.id === L.spawnZone);
+    const other = L.zones.find((q) => q.id !== L.spawnZone);
+    if (!z || !other) throw new Error('need two zones');
+    const a = tileCenter(z.rect.x + 1, z.rect.z + 1);
+    const b = tileCenter(z.rect.x + z.rect.w - 2, z.rect.z + 1);
     assert.equal(grid.lineOfSight(a.x, a.z, b.x, b.z), true);
-    const outside = tileCenter(7, 32); // furnace hall, behind a locked door
-    assert.equal(grid.lineOfSight(a.x, a.z, outside.x, outside.z), false);
+    const far = tileCenter(other.rect.x + (other.rect.w >> 1), other.rect.z + (other.rect.h >> 1));
+    assert.equal(grid.lineOfSight(a.x, a.z, far.x, far.z), false);
   });
 
-  it('builds a flow field that descends to the goal', () => {
-    const torn = new Set<number>();
-    assert.equal(grid.buildFlowField(24, 31, torn), true);
-
-    let tx = 20;
-    let tz = 27;
+  it('builds a flow field that strictly descends to the goal from everywhere', () => {
+    assert.equal(grid.buildFlowField(L.spawn.tx, L.spawn.tz, new Set()), true);
     let steps = 0;
-    while (!(tx === 24 && tz === 31)) {
-      const f = grid.flowAt(tx, tz);
-      if (!f) throw new Error(`no flow at ${tx},${tz}`);
-      const before = grid.distanceAt(tx, tz);
-      tx += f.dx;
-      tz += f.dz;
-      assert.equal(grid.distanceAt(tx, tz), before - 1, 'flow must strictly descend');
-      assert.ok(++steps < 500, 'flow field looped');
+    for (const start of floodFloor(L.tiles, L.spawn.tx, L.spawn.tz)) {
+      let tx = start % MAP_W;
+      let tz = Math.floor(start / MAP_W);
+      let guard = 0;
+      while (!(tx === L.spawn.tx && tz === L.spawn.tz)) {
+        const f = grid.flowAt(tx, tz);
+        if (!f) throw new Error(`no flow at ${tx},${tz}`);
+        const before = grid.distanceAt(tx, tz);
+        tx += f.dx;
+        tz += f.dz;
+        assert.equal(grid.distanceAt(tx, tz), before - 1, 'flow must strictly descend');
+        assert.ok(++guard < 500, 'flow field looped');
+        steps++;
+      }
     }
     assert.ok(steps > 0);
   });
 
   it('will not path through an intact barricade but will through a torn one', () => {
-    const b = BARRICADES[0];
+    const b = L.barricades[0];
     const torn = new Set<number>();
     assert.equal(grid.solidForZombie(b.tx, b.tz, torn), true);
     torn.add(grid.idx(b.tx, b.tz));
@@ -221,7 +220,18 @@ describe('collision and pathing', () => {
   });
 
   it('refuses to build a field on a solid goal', () => {
-    assert.equal(new NavGrid(buildTileMap()).buildFlowField(0, 0, new Set()), false);
+    assert.equal(new NavGrid(L.tiles).buildFlowField(0, 0, new Set()), false);
+  });
+
+  it('knows which room every prop stands in and what is behind it', () => {
+    for (const p of [...L.perks, ...L.wallBuys, ...L.boxPads, L.powerSwitch, L.pack]) {
+      assert.equal(zoneAt(L, p.tx, p.tz), p.zone);
+      const { nx, nz } = facingNormal(p.facing);
+      assert.equal(L.tiles[(p.tz - nz) * MAP_W + (p.tx - nx)], T_WALL);
+    }
+    assert.ok(L.doors.every((d) => L.tiles[d.rect.z * MAP_W + d.rect.x] === T_DOOR));
+    assert.ok(L.barricades.every((b) => L.tiles[b.tz * MAP_W + b.tx] === T_BARRICADE));
+    assert.equal(L.tiles.length, MAP_W * MAP_H);
   });
 });
 
@@ -312,15 +322,10 @@ describe('weapons', () => {
   it('describes every weapon completely', () => {
     for (const w of Object.values(WEAPONS)) {
       assert.ok(w.name.length > 0, `${w.id} has no name`);
-      assert.ok(w.parts.length > 0, `${w.id} has no view model`);
+      assert.ok(GUN_IDS.includes(w.id), `${w.id} has no model`);
       assert.ok(w.rpm > 0 && w.magSize > 0, `${w.id} has bad fire data`);
       assert.ok(w.range > 0);
       assert.ok(w.reserveMax >= w.magSize, `${w.id} reserve smaller than a magazine`);
-      for (const p of w.parts) {
-        assert.equal(p.size.length, 3);
-        assert.equal(p.pos.length, 3);
-        assert.ok(p.size.every((v) => v > 0), `${w.id} has a zero-size part`);
-      }
     }
   });
 

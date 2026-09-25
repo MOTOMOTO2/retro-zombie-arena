@@ -52,6 +52,7 @@ export class Hud {
   private readonly lowHealthEl = el('low-health');
   private readonly timersEl = el('powerup-timers');
   private readonly crosshairEl = el('crosshair');
+  private readonly scopeEl = el('scope');
   private readonly minimap = el<HTMLCanvasElement>('minimap');
   private readonly mmCtx: CanvasRenderingContext2D;
 
@@ -186,6 +187,11 @@ export class Hud {
 
   setCrosshair(visible: boolean): void {
     this.crosshairEl.classList.toggle('hide', !visible);
+  }
+
+  /** The rifle scope: a black mask with a post reticle. */
+  setScope(on: boolean): void {
+    this.scopeEl.classList.toggle('show', on);
   }
 
   setPowerupTimers(list: { name: string; color: string; seconds: number }[]): void {

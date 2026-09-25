@@ -46,6 +46,7 @@
         <div id="powerup-timers"></div>
         <canvas id="minimap" width="220" height="184" class="hidden"></canvas>
         <div id="low-health"></div>
+        <div id="scope"><div class="lens"></div><i class="post"></i><i class="bar"></i></div>
       </div>
 
       <!-- ==================================================== menus -->
@@ -88,7 +89,7 @@
                 <p><b>EARN POINTS</b> by hitting and killing the dead. Spend them on
                   doors, wall guns, the mystery box and perk machines.</p>
                 <p><b>HOLD F</b> at a boarded window to nail the planks back on.</p>
-                <p><b>FIND THE GENERATOR</b> in the north-east. No power, no perks.</p>
+                <p><b>FIND THE GENERATOR.</b> The asylum is different every night, but the power is always as far from the front door as it can be. No power, no perks.</p>
                 <p><b>EVERY FIFTH ROUND</b> the hellhounds come instead. They are fast.
                   The last one always drops max ammo.</p>
                 <p><b>KEEP MOVING.</b> Nothing in here out-runs a trained horde except
@@ -103,11 +104,15 @@
             <label class="row">
               <span>GRAPHICS</span>
               <select id="opt-quality">
-                <option value="ps1">1996 &mdash; 320&times;200, 8 colours/ch</option>
-                <option value="dos" selected>1999 &mdash; 240p, dithered</option>
-                <option value="y2k">2003 &mdash; 360p</option>
-                <option value="crisp">MODERN &mdash; 540p</option>
+                <option value="ps1">1996 &mdash; 200p, heavy dither</option>
+                <option value="dos">1999 &mdash; 240p, dithered</option>
+                <option value="y2k" selected>2003 &mdash; 360p (default)</option>
+                <option value="crisp">MODERN &mdash; 540p, clean</option>
               </select>
+            </label>
+            <label class="row">
+              <span>BRIGHTNESS <b id="val-bright">50</b></span>
+              <input id="opt-bright" type="range" min="0" max="100" value="50" />
             </label>
             <label class="row">
               <span>SENSITIVITY <b id="val-sens">2.2</b></span>

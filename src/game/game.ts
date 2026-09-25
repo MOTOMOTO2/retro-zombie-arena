@@ -6,23 +6,24 @@
 
 import * as THREE from 'three';
 
-import { audio } from '../core/audio.ts';
+import { audio, type ZombieVoice } from '../core/audio.ts';
 import { Input } from '../core/input.ts';
 import { Rng } from '../core/rng.ts';
 import { RetroPipeline, type RetroQuality } from '../core/retro.ts';
-import { ParticleField, flatMaterial } from '../gfx/models.ts';
+import { ParticleField, applyLight, flatMaterial } from '../gfx/models.ts';
 import { textures } from '../gfx/textures.ts';
 import { NavGrid } from '../world/grid.ts';
-import { buildLevel, zoneFogColor } from '../world/build.ts';
+import { buildLevel, fogColorAt, type BuiltLevel } from '../world/build.ts';
+import { dressLevel } from '../world/dressing.ts';
 import {
-  BOX_PADS,
-  PLAYER_SPAWN,
   TILE,
   T_FLOOR,
   WALL_H,
+  type Layout,
   type ZoneId,
-  buildTileMap,
+  generateLayout,
   getZone,
+  randomSeed,
   tileCenter,
   worldToTile,
   zoneAt,
@@ -30,9 +31,12 @@ import {
 import {
   BarricadeProp,
   DoorProp,
+  MysteryBox,
   PerkMachine,
   WallBuy,
   buildProps,
+  disposeProps,
+  propGroups,
   type PropSet,
 } from '../world/props.ts';
 import { Enemy, EnemyPool, rayHitsEnemy } from './enemy.ts';
@@ -109,13 +113,20 @@ export class Game {
   readonly player = new Player();
   readonly viewmodel = new ViewModel();
 
-  private readonly grid: NavGrid;
+  private grid!: NavGrid;
+  private layout!: Layout;
+  private level!: BuiltLevel;
+  private props!: PropSet;
+  private readonly box = new MysteryBox();
+  /** True while the world built at boot has not been played yet. */
+  private worldFresh = false;
   private readonly pool = new EnemyPool();
-  private readonly props: PropSet;
   private readonly particles = new ParticleField(1200, 0.2);
   private readonly rng = new Rng(Date.now() >>> 0);
   private readonly torch: THREE.PointLight;
-  private readonly fog = new THREE.Fog(0x0a0a0c, 11, 96);
+  private readonly muzzleLight = new THREE.PointLight(0xffc070, 0, 26, 2);
+  private muzzleLightTimer = 0;
+  private readonly fog = new THREE.Fog(0x1c1a1c, 16, 120);
 
   private readonly tracers: THREE.Mesh[] = [];
   private readonly tracerLife: number[] = [];
@@ -165,48 +176,38 @@ export class Game {
 
   private readonly tmpV = new THREE.Vector3();
   private readonly tmpDir = new THREE.Vector3();
-  private readonly fogTarget = new THREE.Color(0x0a0a0c);
+  private readonly fogTarget = new THREE.Color(0x1c1a1c);
+  private readonly tmpLight = new THREE.Color();
 
   constructor(canvas: HTMLCanvasElement, quality: RetroQuality) {
     this.retro = new RetroPipeline(canvas, quality);
     this.camera = new THREE.PerspectiveCamera(this.fovBase, this.retro.aspect, 0.1, 260);
     this.input = new Input(canvas, () => {});
 
-    const tiles = buildTileMap();
-    this.grid = new NavGrid(tiles);
-
     this.scene.fog = this.fog;
-    this.scene.background = new THREE.Color(0x05060a);
+    this.scene.background = new THREE.Color(0x1c1a1c);
     // The level carries its lighting in its vertex colours, so ambient sits at
-    // full strength and simply reproduces the bake. Dynamic objects read as
-    // flat-lit against it - which is exactly how the era looked - and the
-    // player's torch plus the machine lights give them their shape up close.
+    // full strength and simply reproduces the bake. Moving things are tinted
+    // by the light probe instead, so they pick up the same lamps.
     // Intensity of PI exactly cancels the Lambert 1/PI term, so a surface with
     // a baked vertex colour of 1.0 renders at its full texture value.
     this.scene.add(new THREE.AmbientLight(0xffffff, Math.PI));
-    this.scene.add(new THREE.HemisphereLight(0x8fa0c0, 0x2e2318, 0.38));
 
-    const level = buildLevel(tiles);
-    this.scene.add(level.group);
-
-    this.props = buildProps();
-    for (const d of this.props.doors) this.scene.add(d.group);
-    for (const b of this.props.barricades) this.scene.add(b.group);
-    for (const m of this.props.machines) this.scene.add(m.group);
-    for (const w of this.props.wallBuys) this.scene.add(w.group);
-    this.scene.add(this.props.box.group);
-    this.scene.add(this.props.power.group);
-    this.scene.add(this.props.pack.group);
-    this.scene.add(this.props.clutter);
+    this.scene.add(this.box.group);
     this.scene.add(this.pool.group);
     this.scene.add(this.particles.points);
 
-    this.torch = new THREE.PointLight(0xffd2a0, 46, 30, 2);
+    // A dim lantern glow around the player, just enough to read a face at arm's length.
+    this.torch = new THREE.PointLight(0xffd2a0, 9, 16, 2);
     this.scene.add(this.torch);
+    this.scene.add(this.muzzleLight);
+    this.viewmodel.init(this.retro.renderer);
+    this.viewmodel.onEvent = (e) => audio.mech(e);
 
     this.buildTracerPool();
     this.buildDecalPool();
-    this.props.box.moveTo(BOX_PADS[0].tx, BOX_PADS[0].tz, 0);
+    this.buildWorld(randomSeed());
+    this.worldFresh = true;
 
     this.viewmodel.equip('sidearm');
     this.resize();
@@ -261,7 +262,10 @@ export class Game {
       this.decalCursor = (this.decalCursor + 1) % this.decals.length;
       if (m.userData.blood !== blood) continue;
       m.visible = true;
-      (m.material as THREE.MeshBasicMaterial).opacity = blood ? 0.85 : 0.95;
+      const mat = m.material as THREE.MeshBasicMaterial;
+      mat.opacity = blood ? 0.85 : 0.95;
+      this.level.probe.sample(x, z, mat.color);
+      mat.color.multiplyScalar(1.3);
       m.position.set(x + nx * 0.03, y, z + nz * 0.03);
       m.scale.setScalar(scale);
       if (nx === 0 && nz === 0) {
@@ -286,6 +290,42 @@ export class Game {
       (m.material as THREE.MeshBasicMaterial).opacity = 0.95;
       this.tracerLife[i] = 0.055;
       return;
+    }
+  }
+
+  /* --------------------------------------------------------------- world */
+
+  /** Throws away the current asylum and builds a new one from a seed. */
+  private buildWorld(seed: number): void {
+    if (this.level) {
+      this.scene.remove(this.level.group);
+      this.level.dispose();
+      for (const g of propGroups(this.props)) this.scene.remove(g);
+      disposeProps(this.props);
+    }
+    this.layout = generateLayout(seed);
+    this.grid = new NavGrid(this.layout.tiles);
+    this.level = buildLevel(this.layout, dressLevel(this.layout));
+    this.scene.add(this.level.group);
+    this.props = buildProps(this.layout, this.level.probe);
+    for (const g of propGroups(this.props)) this.scene.add(g);
+    this.box.moveTo(this.layout.boxPads[0], 0, this.level.probe);
+    const spawnZone = getZone(this.layout, this.layout.spawnZone);
+    this.fog.color.copy(fogColorAt(this.layout, spawnZone.id));
+  }
+
+  /** The seed of the asylum currently loaded. */
+  get seed(): number {
+    return this.layout.seed;
+  }
+
+  /** Opens a zone for spawning, and anything joined to it by an open archway. */
+  private openZone(id: ZoneId): void {
+    if (this.openZones.has(id)) return;
+    this.openZones.add(id);
+    for (const [a, b] of this.layout.openLinks) {
+      if (a === id) this.openZone(b);
+      if (b === id) this.openZone(a);
     }
   }
 
@@ -316,15 +356,23 @@ export class Game {
 
   /* --------------------------------------------------------------- start */
 
-  newRun(): void {
-    const spawn = tileCenter(PLAYER_SPAWN.tx, PLAYER_SPAWN.tz);
+  /**
+   * Starts a run. Every run gets a freshly generated asylum; pass a seed to
+   * replay a particular one.
+   */
+  newRun(seed?: number): void {
+    if (seed !== undefined || !this.worldFresh) this.buildWorld(seed ?? randomSeed());
+    this.worldFresh = false;
+
+    const spawn = tileCenter(this.layout.spawn.tx, this.layout.spawn.tz);
     this.player.reset(spawn.x, spawn.z);
-    this.player.yaw = Math.PI;
+    this.player.yaw = this.layout.spawn.yaw;
+    this.player.pitch = 0;
 
     this.pool.reset();
     this.torn.clear();
     this.openZones.clear();
-    this.openZones.add('lobby');
+    this.openZone(this.layout.spawnZone);
     this.activePowerups.clear();
     this.projectiles.length = 0;
     this.drops.length = 0;
@@ -335,9 +383,9 @@ export class Game {
     this.boxLimit = this.rng.int(BOX_MOVE_MAX - BOX_MOVE_MIN + 1) + BOX_MOVE_MIN;
     this.boxState = 'idle';
     this.boxOffer = null;
-    this.props.box.setLid(0);
-    this.props.box.showWeapon(null);
-    this.props.box.moveTo(BOX_PADS[0].tx, BOX_PADS[0].tz, 0);
+    this.box.setLid(0);
+    this.box.showWeapon(null);
+    this.box.moveTo(this.layout.boxPads[0], 0, this.level.probe);
     this.props.pack.showWeapon(null);
     this.props.pack.setPowered(false);
     this.props.power.setOn(false);
@@ -349,11 +397,7 @@ export class Game {
     // Rebuild the map state: every door shut, every window boarded.
     this.grid.tiles.set(this.grid.base);
     this.grid.invalidateField();
-    for (const d of this.props.doors) {
-      d.open = false;
-      d.group.visible = true;
-      d.group.position.y = 0;
-    }
+    for (const d of this.props.doors) d.reset();
     for (const b of this.props.barricades) {
       while (b.addBoard());
     }
@@ -362,7 +406,7 @@ export class Game {
     for (const d of this.drops) this.scene.remove(d.group);
 
     this.viewmodel.reset();
-    this.viewmodel.equip('sidearm');
+    this.equipCurrent();
 
     this.round = 0;
     this.killedThisRound = 0;
@@ -383,6 +427,7 @@ export class Game {
     this.setState('playing');
     audio.startMusic();
     this.hud.banner('ST. MERCY ASYLUM', 2.6, '#e8e2ce');
+    this.hud.toast(`${getZone(this.layout, this.layout.spawnZone).name}  ·  LAYOUT #${this.layout.seed}`, '#bdb6a0', 3.2);
   }
 
   pause(): void {
@@ -487,7 +532,7 @@ export class Game {
     const { dx, dy } = this.input.takeMouse();
     this.lookDX = dx / Math.max(dt, 1 / 240) * 0.004;
     this.lookDY = dy / Math.max(dt, 1 / 240) * 0.004;
-    const scale = this.input.aim ? 0.55 : 1;
+    const scale = this.viewmodel.scopeView ? 0.3 : this.input.aim ? 0.55 : 1;
     this.player.yaw -= dx * scale;
     this.player.pitch -= dy * scale;
     const limit = Math.PI / 2 - 0.02;
@@ -498,14 +543,12 @@ export class Game {
     const p = this.player;
     if (!p.alive) return;
 
-    if (this.input.consume('reload') && p.tryReload()) {
-      this.viewmodel.setPose('reload', p.reloadRemaining);
-      audio.reloadClick(1);
-    }
+    if (this.input.consume('reload')) this.startReload();
     if (this.input.consume('melee') && p.tryMelee()) {
       this.viewmodel.setPose('melee', 0.52);
     }
     if (this.input.consume('grenade') && p.hasGrenades && p.tryGrenade()) {
+      this.viewmodel.setPose('throw', 0.7);
       this.throwGrenade();
       this.hud.setGrenades(p.grenades, p.hasGrenades);
     }
@@ -526,6 +569,20 @@ export class Game {
     if (wantsFire) this.attemptFire();
   }
 
+  /** Starts a reload if one is possible, and the matching animation. */
+  private startReload(): boolean {
+    const p = this.player;
+    const empty = p.slot.mag === 0;
+    if (!p.tryReload()) return false;
+    this.viewmodel.setPose('reload', p.reloadRemaining, { empty });
+    return true;
+  }
+
+  /** Puts the weapon in the active slot into the player's hands. */
+  private equipCurrent(): void {
+    this.viewmodel.equip(this.player.slot.id, this.player.slot.packed);
+  }
+
   /* ---------------------------------------------------------------- combat */
 
   private attemptFire(): void {
@@ -533,16 +590,18 @@ export class Game {
     if (outcome.kind === 'none') return;
     if (outcome.kind === 'dry') {
       audio.dryFire();
-      if (this.player.slot.reserve > 0 && this.player.tryReload()) {
-        this.viewmodel.setPose('reload', this.player.reloadRemaining);
-      }
+      if (this.player.slot.reserve > 0) this.startReload();
       return;
     }
     if (outcome.kind !== 'shoot') return;
 
     const def = outcome.def;
     const packed = this.player.slot.packed;
+    // Firing out of a shell-by-shell reload abandons it.
+    if (def.shellReload) this.viewmodel.cancelShells();
     this.viewmodel.kick(def.kick * (this.input.aim ? 0.6 : 1));
+    this.muzzleLightTimer = 0.06;
+    this.muzzleLight.color.setHex(def.tracer || 0xffc070);
     this.shake = Math.min(3.2, this.shake + def.shake * 0.35);
     audio.shot(def, { x: this.player.x, z: this.player.z });
     this.syncAmmoHud();
@@ -764,6 +823,7 @@ export class Game {
     }
 
     if (res.gibbed) e.model.root.visible = false;
+    else if (e.kind !== 'hound' && this.rng.chance(0.65)) audio.zombieVoice({ x: e.x, z: e.z }, 'death', this.voicePitch(e));
     const kindOfKill = explosive ? 'explosive' : head ? 'head' : 'body';
     const award = scoreForKill(kindOfKill, doublePoints);
     this.player.award(award);
@@ -973,7 +1033,7 @@ export class Game {
       );
     }
 
-    const box = this.props.box;
+    const box = this.box;
     if (this.boxState === 'offer' && this.boxBuyer && this.boxOffer) {
       consider(
         box.center.x, box.center.z,
@@ -1013,7 +1073,7 @@ export class Game {
         this.grid.set(x, z, T_FLOOR);
       }
     }
-    for (const zone of door.def.connects) this.openZones.add(zone);
+    for (const zone of door.def.connects) this.openZone(zone);
     audio.doorOpen({ x: door.center.x, z: door.center.z });
     this.hud.setPoints(this.player.points);
     this.hud.pointsDelta(-door.def.cost);
@@ -1061,7 +1121,7 @@ export class Game {
       return;
     }
     this.player.giveWeapon(w.weaponId);
-    this.viewmodel.equip(this.player.slot.id);
+    this.equipCurrent();
     this.viewmodel.setPose('raise', 0.32);
     this.syncAmmoHud();
     this.finishPurchase(def.wallCost, def.name);
@@ -1111,6 +1171,8 @@ export class Game {
     slot.packed = true;
     slot.mag = def.magSize;
     slot.reserve = def.reserveMax;
+    this.equipCurrent();
+    this.viewmodel.setPose('raise', 0.4);
     this.props.pack.showWeapon(slot.id);
     window.setTimeout(() => this.props.pack.showWeapon(null), 1800);
     audio.perkJingle();
@@ -1128,7 +1190,7 @@ export class Game {
     this.boxBuyer = true;
     this.boxRolls++;
     audio.boxJingle();
-    this.props.box.setLid(1);
+    this.box.setLid(1);
     this.hud.setPoints(this.player.points);
     this.hud.pointsDelta(-MYSTERY_BOX_COST);
   }
@@ -1137,7 +1199,7 @@ export class Game {
     if (!this.boxOffer) return;
     const id = this.boxOffer;
     this.player.giveWeapon(id);
-    this.viewmodel.equip(this.player.slot.id);
+    this.equipCurrent();
     this.viewmodel.setPose('raise', 0.32);
     this.syncAmmoHud();
     audio.buy();
@@ -1145,7 +1207,7 @@ export class Game {
     this.boxOffer = null;
     this.boxState = 'closing';
     this.boxTimer = 0.5;
-    this.props.box.showWeapon(null);
+    this.box.showWeapon(null);
   }
 
   private finishPurchase(cost: number, label: string, jingle = true): void {
@@ -1194,12 +1256,12 @@ export class Game {
     const p = this.player;
     p.tickHealth(dt);
     p.tickWeapons(dt, (e) => {
-      if (e === 'reloaded') audio.reloadClick(0.8);
-      else if (e === 'shell') {
-        audio.reloadClick(1.3);
+      if (e === 'shell') {
+        // Another shell if the tube is not full yet, otherwise pump one in.
         if (p.reloading) this.viewmodel.setPose('reload', p.reloadRemaining);
+        else this.viewmodel.setPose('shellEnd', 0.5);
       } else if (e === 'swapped') {
-        this.viewmodel.equip(p.slot.id);
+        this.equipCurrent();
         this.viewmodel.setPose('raise', 0.3);
         this.syncAmmoHud();
       } else if (e === 'melee-hit') {
@@ -1326,7 +1388,11 @@ export class Game {
       if (!e.active) continue;
       e.update(
         dt, this.grid, this.player.x, this.player.z, this.player.alive, this.torn,
-        (_enemy, dmg) => this.hurtPlayer(dmg),
+        (enemy, dmg) => {
+          this.hurtPlayer(dmg);
+          if (enemy.kind === 'hound') audio.bark({ x: enemy.x, z: enemy.z });
+          else if (this.rng.chance(0.7)) audio.zombieVoice({ x: enemy.x, z: enemy.z }, 'snarl', this.voicePitch(enemy));
+        },
         (_enemy, b) => {
           audio.boardBreak({ x: b.center.x, z: b.center.z });
           for (let i = 0; i < 6; i++) {
@@ -1343,12 +1409,37 @@ export class Game {
         },
         (enemy) => {
           if (enemy.kind === 'hound') audio.bark({ x: enemy.x, z: enemy.z });
-          else audio.groan({ x: enemy.x, z: enemy.z }, enemy.kind === 'brute' ? 0.7 : 1);
+          else this.zombieSpeaks(enemy);
         },
       );
     }
 
     this.pool.resolveCrowding(this.grid, this.torn);
+
+    const probe = this.level.probe;
+    for (const e of this.pool.all) {
+      if (!e.active) continue;
+      probe.sample(e.x, e.z, this.tmpLight);
+      // Freshly shot bodies flash, which reads as a hit even at a distance.
+      if (e.hitFlash > 0) this.tmpLight.addScalar(e.hitFlash * 1.6);
+      applyLight(e.model, this.tmpLight);
+    }
+  }
+
+  /** Deeper for brutes, higher for runners, and never quite the same twice. */
+  private voicePitch(e: Enemy): number {
+    const base = e.kind === 'brute' ? 0.72 : e.kind === 'runner' ? 1.18 : 1;
+    return base * this.rng.range(0.9, 1.1);
+  }
+
+  /** Idle vocalising: a long moan from afar, a growl once it has your scent. */
+  private zombieSpeaks(e: Enemy): void {
+    const d = Math.hypot(e.x - this.player.x, e.z - this.player.z);
+    const hunting = e.state === 'hunt' || e.state === 'attack';
+    let kind: ZombieVoice = 'moan';
+    if (e.kind === 'runner' && this.rng.chance(0.3)) kind = 'scream';
+    else if (hunting && d < 16 && this.rng.chance(0.55)) kind = 'growl';
+    audio.zombieVoice({ x: e.x, z: e.z }, kind, this.voicePitch(e));
   }
 
   private updateProjectiles(dt: number): void {
@@ -1455,7 +1546,7 @@ export class Game {
   }
 
   private updateBox(dt: number): void {
-    const box = this.props.box;
+    const box = this.box;
     box.animate(this.elapsed, this.elapsed * 6);
 
     if (this.boxState === 'rolling') {
@@ -1506,11 +1597,12 @@ export class Game {
     if (this.boxState === 'moving') {
       this.boxTimer -= dt;
       if (this.boxTimer <= 0) {
-        const open = BOX_PADS.map((p, i) => ({ p, i })).filter(
+        const pads = this.layout.boxPads;
+        const open = pads.map((p, i) => ({ p, i })).filter(
           (e) => this.openZones.has(e.p.zone) && e.i !== box.padIndex,
         );
-        const pick = open.length ? open[this.rng.int(open.length)] : { p: BOX_PADS[0], i: 0 };
-        box.moveTo(pick.p.tx, pick.p.tz, pick.i);
+        const pick = open.length ? open[this.rng.int(open.length)] : { p: pads[0], i: 0 };
+        box.moveTo(pick.p, pick.i, this.level.probe);
         this.boxRolls = 0;
         this.boxLimit = this.rng.int(BOX_MOVE_MAX - BOX_MOVE_MIN + 1) + BOX_MOVE_MIN;
         this.boxState = 'idle';
@@ -1520,6 +1612,7 @@ export class Game {
 
   private updateProps(dt: number): void {
     for (const d of this.props.doors) d.update(dt);
+    this.level.update(this.elapsed);
     for (const m of this.props.machines) m.animate(this.elapsed);
     for (const w of this.props.wallBuys) w.animate(this.elapsed);
     this.props.pack.animate(this.elapsed);
@@ -1572,30 +1665,43 @@ export class Game {
     this.camera.rotateX(p.pitch);
     this.camera.rotateZ(Math.sin(this.bobPhase * 0.5) * 0.012 * bobAmount + shakeX * 0.4);
 
-    const targetFov = this.fovBase * (this.input.aim ? 0.72 : 1) * (p.sprinting ? 1.045 : 1);
+    const scoped = this.viewmodel.scopeView;
+    const targetFov = this.fovBase * (scoped ? 0.3 : this.input.aim ? 0.72 : 1) * (p.sprinting ? 1.045 : 1);
+    this.hud.setScope(scoped);
     this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 11);
     this.camera.updateProjectionMatrix();
 
     this.torch.position.copy(this.camera.position);
-    this.torch.intensity = 44 + Math.sin(this.elapsed * 9) * 2.5;
+    this.torch.intensity = 9 + Math.sin(this.elapsed * 9) * 0.5;
 
     // Fog colour eases toward whichever room the player is standing in.
     const { tx, tz } = worldToTile(p.x, p.z);
-    this.fogTarget.copy(zoneFogColor(zoneAt(tx, tz)));
+    this.fogTarget.copy(fogColorAt(this.layout, zoneAt(this.layout, tx, tz)));
     this.fog.color.lerp(this.fogTarget, Math.min(1, dt * 1.6));
     (this.scene.background as THREE.Color).copy(this.fog.color);
 
     audio.setListener({ x: p.x, z: p.z }, p.yaw);
     audio.updateMusic(dt, Math.min(1, this.round / 14 + this.pool.liveCount / 24));
 
+    this.level.probe.sample(p.x, p.z, this.tmpLight);
     this.viewmodel.update(dt, {
       speed: p.planarSpeed,
       grounded: p.grounded,
       aiming: this.input.aim,
+      sprinting: p.sprinting,
       lookDX: this.lookDX,
       lookDY: this.lookDY,
       lowHealth: p.healthFraction < 0.35,
+      mag: p.slot.mag,
+      light: this.tmpLight,
     });
+    if (this.muzzleLightTimer > 0) {
+      this.muzzleLightTimer -= dt;
+      this.viewmodel.muzzleWorld(this.camera, this.muzzleLight.position);
+      this.muzzleLight.intensity = Math.max(0, this.muzzleLightTimer / 0.06) * 60;
+    } else {
+      this.muzzleLight.intensity = 0;
+    }
     this.lookDX *= 0.82;
     this.lookDY *= 0.82;
   }
@@ -1619,7 +1725,7 @@ export class Game {
       this.pool.forEachLive((e) =>
         blips.push({ x: e.x, z: e.z, color: e.kind === 'hound' ? '#ff6a2a' : '#d22f26' }),
       );
-      blips.push({ x: this.props.box.center.x, z: this.props.box.center.z, color: '#ffc84d' });
+      blips.push({ x: this.box.center.x, z: this.box.center.z, color: '#ffc84d' });
       for (const m of this.props.machines) {
         if (!m.powered) continue;
         blips.push({
@@ -1647,7 +1753,7 @@ export class Game {
   /** Name of the room the player is standing in, for the pause screen. */
   get currentZoneName(): string {
     const { tx, tz } = worldToTile(this.player.x, this.player.z);
-    const z = zoneAt(tx, tz);
-    return z ? getZone(z).name : 'CORRIDOR';
+    const z = zoneAt(this.layout, tx, tz);
+    return z ? getZone(this.layout, z).name : 'CORRIDOR';
   }
 }

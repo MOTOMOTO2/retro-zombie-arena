@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>RETRO ZOMBIE ARENA</title>
+    <meta name="description" content="An arcade wave-survival FPS with early-3D-era graphics." />
+    <meta name="theme-color" content="#0a0a0c" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <!-- ================================================= in-game HUD -->
+      <div id="hud" class="hidden">
+        <div id="crosshair"><span></span><span></span><span></span><span></span><i></i></div>
+        <div id="hitmarker"></div>
+        <div id="damage-ring"></div>
+
+        <div class="hud-corner top-left">
+          <div id="points" class="big">500</div>
+          <div id="points-delta" class="delta"></div>
+        </div>
+
+        <div class="hud-corner top-right">
+          <div id="perk-row"></div>
+        </div>
+
+        <div class="hud-corner bottom-left">
+          <div class="label">ROUND</div>
+          <div id="round" class="big round">1</div>
+          <div id="round-pips"></div>
+          <div id="health-wrap"><div id="health-bar"></div></div>
+          <div id="stamina-wrap"><div id="stamina-bar"></div></div>
+        </div>
+
+        <div class="hud-corner bottom-right">
+          <div id="weapon-name">PEACEKEEPER .45</div>
+          <div id="ammo"><span id="mag">8</span><span class="slash">/</span><span id="reserve">64</span></div>
+          <div id="nades">GRENADES <b>2</b></div>
+        </div>
+
+        <div id="prompt"></div>
+        <div id="toast"></div>
+        <div id="banner"></div>
+        <div id="powerup-timers"></div>
+        <canvas id="minimap" width="220" height="184" class="hidden"></canvas>
+        <div id="low-health"></div>
+      </div>
+
+      <!-- ==================================================== menus -->
+      <div id="menu" class="overlay">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <h1 class="title">
+            <span class="t1">RETRO</span>
+            <span class="t2">ZOMBIE</span>
+            <span class="t3">ARENA</span>
+          </h1>
+          <p class="tagline">ST. MERCY ASYLUM &mdash; SURVIVE THE NIGHT</p>
+
+          <div id="menu-main" class="panel">
+            <button id="btn-play" class="btn primary">START GAME</button>
+            <button id="btn-howto" class="btn">HOW TO PLAY</button>
+            <button id="btn-settings" class="btn">SETTINGS</button>
+            <div id="best" class="best"></div>
+          </div>
+
+          <div id="menu-howto" class="panel hidden">
+            <h2>HOW TO PLAY</h2>
+            <div class="cols">
+              <ul class="keys">
+                <li><b>WASD</b> move</li>
+                <li><b>MOUSE</b> look</li>
+                <li><b>LMB</b> fire</li>
+                <li><b>RMB</b> aim</li>
+                <li><b>SHIFT</b> sprint</li>
+                <li><b>SPACE</b> jump</li>
+                <li><b>R</b> reload</li>
+                <li><b>F</b> buy / use / repair</li>
+                <li><b>V</b> knife</li>
+                <li><b>G</b> grenade</li>
+                <li><b>1 2 / Q</b> swap weapon</li>
+                <li><b>TAB</b> map</li>
+                <li><b>M</b> mute &nbsp; <b>ESC</b> pause</li>
+              </ul>
+              <div class="tips">
+                <p><b>EARN POINTS</b> by hitting and killing the dead. Spend them on
+                  doors, wall guns, the mystery box and perk machines.</p>
+                <p><b>HOLD F</b> at a boarded window to nail the planks back on.</p>
+                <p><b>FIND THE GENERATOR</b> in the north-east. No power, no perks.</p>
+                <p><b>EVERY FIFTH ROUND</b> the hellhounds come instead. They are fast.
+                  The last one always drops max ammo.</p>
+                <p><b>KEEP MOVING.</b> Nothing in here out-runs a trained horde except
+                  a player in a circle.</p>
+              </div>
+            </div>
+            <button class="btn back">BACK</button>
+          </div>
+
+          <div id="menu-settings" class="panel hidden">
+            <h2>SETTINGS</h2>
+            <label class="row">
+              <span>GRAPHICS</span>
+              <select id="opt-quality">
+                <option value="ps1">1996 &mdash; 320&times;200, 8 colours/ch</option>
+                <option value="dos" selected>1999 &mdash; 240p, dithered</option>
+                <option value="y2k">2003 &mdash; 360p</option>
+                <option value="crisp">MODERN &mdash; 540p</option>
+              </select>
+            </label>
+            <label class="row">
+              <span>SENSITIVITY <b id="val-sens">2.2</b></span>
+              <input id="opt-sens" type="range" min="4" max="60" value="22" />
+            </label>
+            <label class="row">
+              <span>VOLUME <b id="val-vol">70</b></span>
+              <input id="opt-vol" type="range" min="0" max="100" value="70" />
+            </label>
+            <label class="row">
+              <span>INVERT Y</span>
+              <input id="opt-invert" type="checkbox" />
+            </label>
+            <label class="row">
+              <span>FOV <b id="val-fov">80</b></span>
+              <input id="opt-fov" type="range" min="65" max="110" value="80" />
+            </label>
+            <button class="btn back">BACK</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="pause" class="overlay hidden">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <h1 class="title small"><span class="t2">PAUSED</span></h1>
+          <div class="panel">
+            <button id="btn-resume" class="btn primary">RESUME</button>
+            <button id="btn-quit" class="btn">ABANDON RUN</button>
+            <div id="pause-stats" class="stats"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="gameover" class="overlay hidden">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <h1 class="title small"><span class="t1">YOU</span> <span class="t3">DIED</span></h1>
+          <div class="panel">
+            <div id="go-stats" class="stats"></div>
+            <button id="btn-again" class="btn primary">TRY AGAIN</button>
+            <button id="btn-menu" class="btn">MAIN MENU</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="click-to-play" class="hidden">CLICK TO LOOK AROUND</div>
+      <div id="boot" class="overlay">
+        <div class="menu-inner">
+          <div class="boot-text">LOADING ST. MERCY ASYLUM&hellip;</div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

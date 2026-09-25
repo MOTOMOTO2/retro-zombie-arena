@@ -185,7 +185,7 @@ describe('collision and pathing', () => {
     let steps = 0;
     while (!(tx === 24 && tz === 31)) {
       const f = grid.flowAt(tx, tz);
-      assert.ok(f, `no flow at ${tx},${tz}`);
+      if (!f) throw new Error(`no flow at ${tx},${tz}`);
       const before = grid.distanceAt(tx, tz);
       tx += f.dx;
       tz += f.dz;

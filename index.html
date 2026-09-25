@@ -99,7 +99,27 @@
             <button class="btn back">BACK</button>
           </div>
 
-          <div id="menu-settings" class="panel hidden">
+        </div>
+      </div>
+
+      <div id="pause" class="overlay see-through hidden">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <h1 class="title small"><span class="t2">PAUSED</span></h1>
+          <div class="panel">
+            <button id="btn-resume" class="btn primary">RESUME</button>
+            <button id="btn-pause-settings" class="btn">SETTINGS</button>
+            <button id="btn-quit" class="btn">ABANDON RUN</button>
+            <div id="pause-stats" class="stats"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shared by the main menu and the pause menu. -->
+      <div id="settings" class="overlay hidden">
+        <div class="scanlines"></div>
+        <div class="menu-inner">
+          <div id="menu-settings" class="panel">
             <h2>SETTINGS</h2>
             <label class="row">
               <span>GRAPHICS</span>
@@ -130,19 +150,8 @@
               <span>FOV <b id="val-fov">80</b></span>
               <input id="opt-fov" type="range" min="65" max="110" value="80" />
             </label>
-            <button class="btn back">BACK</button>
-          </div>
-        </div>
-      </div>
-
-      <div id="pause" class="overlay hidden">
-        <div class="scanlines"></div>
-        <div class="menu-inner">
-          <h1 class="title small"><span class="t2">PAUSED</span></h1>
-          <div class="panel">
-            <button id="btn-resume" class="btn primary">RESUME</button>
-            <button id="btn-quit" class="btn">ABANDON RUN</button>
-            <div id="pause-stats" class="stats"></div>
+            <button id="btn-settings-back" class="btn">BACK</button>
+            <div class="hint">ESC TO GO BACK</div>
           </div>
         </div>
       </div>

@@ -396,6 +396,108 @@ try {
   check('the run reports stats', death.over !== null && typeof death.over.round === 'number');
   check('the game-over screen shows', death.gameoverVisible === true);
 
+  // ----------------------------------------------- settings from the pause menu
+  const menus = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const shown = (id) => !document.getElementById(id).classList.contains('hidden');
+    const esc = () => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape' }));
+    game.newRun();
+    game.input.locked = true;
+    game.pause();
+    const out = { pausedShows: game.state === 'paused' && shown('pause') };
+    document.getElementById('btn-pause-settings').click();
+    out.settingsOpen = shown('settings') && !shown('pause') && game.state === 'paused';
+    out.seeThrough = document.getElementById('settings').classList.contains('see-through');
+    // A setting changed in-game takes effect immediately.
+    const bright = document.getElementById('opt-bright');
+    bright.value = '80';
+    bright.dispatchEvent(new Event('input'));
+    out.brightnessApplied = game.retro.material.uniforms.uExposure.value > 1.5;
+    bright.value = '50';
+    bright.dispatchEvent(new Event('input'));
+    esc();
+    out.escBacksOutToPause = !shown('settings') && shown('pause') && game.state === 'paused';
+    document.getElementById('btn-pause-settings').click();
+    document.getElementById('btn-settings-back').click();
+    out.backButtonToo = !shown('settings') && shown('pause');
+    esc();
+    out.escAgainResumes = game.state === 'playing' && !shown('pause');
+    // And from the main menu it is the same screen.
+    game.abandon();
+    document.getElementById('btn-settings').click();
+    out.mainMenuOpensIt = shown('settings') && !shown('menu') && !document.getElementById('settings').classList.contains('see-through');
+    esc();
+    out.mainMenuReturns = shown('menu') && !shown('settings');
+    return out;
+  });
+  for (const [k, v] of Object.entries(menus)) check(`menus: ${k}`, v === true);
+
+  // ------------------------------------------------------------- the horde
+  const horde2 = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun(4242);
+    game.input.locked = true;
+    game.pool.reset();
+    game.player.award(1e6);
+    for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+    game.roundPhase = 'clear';
+    game.phaseTimer = 1e9;
+    // Scatter walkers across the fully opened asylum; every one must find the player.
+    const L = game.layout;
+    const floor = [];
+    for (let i = 0; i < L.tiles.length; i++) if (L.tiles[i] === 1) floor.push(i);
+    const bodies = [];
+    for (let n = 0; n < 12; n++) {
+      const e = game.pool.acquire('walker');
+      const t = floor[(n * 7919) % floor.length];
+      e.spawn('walker', ((t % 56) + 0.5) * 4, (Math.floor(t / 56) + 0.5) * 4, 1e6, 1, null, game.rng);
+      e.state = 'hunt';
+      bodies.push({ e, reached: false });
+    }
+    for (let f = 0; f < 60 * 75; f++) {
+      game.player.health = game.player.maxHealth;
+      for (const b of bodies) b.e.lostTime = 0;
+      game.update(1 / 60);
+      for (const b of bodies) {
+        if (Math.hypot(b.e.x - game.player.x, b.e.z - game.player.z) < 5) b.reached = true;
+      }
+    }
+    out.everyZombieFindsThePlayer = bodies.every((b) => b.reached);
+    out.reached = bodies.filter((b) => b.reached).length;
+
+    // Hits: a flinch, a stagger and a shove away from the shooter.
+    game.pool.reset();
+    const e = game.pool.acquire('walker');
+    e.spawn('walker', game.player.x + 6, game.player.z, 500, 3, null, game.rng);
+    e.state = 'hunt';
+    for (let i = 0; i < 10; i++) game.update(1 / 60);
+    const before = { x: e.x, bodyPitch: e.model.body.rotation.x };
+    const res = e.applyDamage(120, false, false, 1, 0);
+    for (let i = 0; i < 6; i++) game.update(1 / 60);
+    out.hitIsNotAKill = !res.killed && e.state !== 'dead';
+    out.hitRocksTheBody = Math.abs(e.model.body.rotation.x - before.bodyPitch) > 0.1;
+    out.hitShovesItBack = e.x > before.x - 0.05;
+    // Deaths: the body falls, lies on the floor, then goes back to the pool.
+    const kill = e.applyDamage(1000, true, false, 1, 0);
+    out.killRegisters = kill.killed && e.state === 'dead';
+    out.headshotTakesTheHead = kill.headless && !e.model.head.visible;
+    for (let i = 0; i < 60; i++) game.update(1 / 60);
+    out.bodyIsDown = Math.abs(e.model.root.rotation.x) > 1.2 || Math.abs(e.model.root.rotation.z) > 1.2;
+    out.corpseLingers = e.active;
+    for (let i = 0; i < 60 * 4; i++) game.update(1 / 60);
+    out.corpseCleansUp = !e.active;
+    // The dead do not catch bullets.
+    let hitDead = false;
+    game.pool.forEachLive((z) => { if (z === e) hitDead = true; });
+    out.deadAreNotTargets = !hitDead;
+    return out;
+  });
+  for (const [k, v] of Object.entries(horde2)) {
+    if (k === 'reached') continue;
+    check(`horde: ${k}`, v === true, k === 'everyZombieFindsThePlayer' ? `${horde2.reached}/12` : '');
+  }
+
   // ------------------------------------------------------- random asylums
   const maps = await page.evaluate(() => {
     const { game } = window.__RZA;

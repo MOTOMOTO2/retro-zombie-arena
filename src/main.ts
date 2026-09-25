@@ -125,10 +125,11 @@ function boot(): void {
   const bootScreen = el('boot');
   const clickToPlay = el('click-to-play');
 
+  const settingsOverlay = el('settings');
+
   const panels = {
     main: el('menu-main'),
     howto: el('menu-howto'),
-    settings: el('menu-settings'),
   };
 
   const showPanel = (name: keyof typeof panels): void => {
@@ -203,9 +204,42 @@ function boot(): void {
   };
   renderBest();
 
+  /* ------------------------------------------------------------ settings screen */
+
+  // Opened from the main menu or from the pause menu; BACK or Esc returns there.
+  let settingsFrom: 'menu' | 'pause' | null = null;
+
+  const openSettings = (from: 'menu' | 'pause'): void => {
+    settingsFrom = from;
+    menu.classList.add('hidden');
+    pause.classList.add('hidden');
+    settingsOverlay.classList.toggle('see-through', from === 'pause');
+    settingsOverlay.classList.remove('hidden');
+    qualitySel.focus();
+  };
+
+  const closeSettings = (): void => {
+    const from = settingsFrom;
+    settingsFrom = null;
+    settingsOverlay.classList.add('hidden');
+    if (from === 'pause' && game.state === 'paused') {
+      pause.classList.remove('hidden');
+      el('btn-pause-settings').focus();
+    } else if (game.state === 'menu') {
+      menu.classList.remove('hidden');
+      showPanel('main');
+      el('btn-settings').focus();
+    }
+  };
+
   game.onStateChange = (s: GameState) => {
-    menu.classList.toggle('hidden', s !== 'menu');
-    pause.classList.toggle('hidden', s !== 'paused');
+    // Leaving the paused state (or dying) takes the settings screen with it.
+    if (settingsFrom === 'pause' && s !== 'paused') {
+      settingsFrom = null;
+      settingsOverlay.classList.add('hidden');
+    }
+    menu.classList.toggle('hidden', s !== 'menu' || settingsFrom !== null);
+    pause.classList.toggle('hidden', s !== 'paused' || settingsFrom !== null);
     gameover.classList.toggle('hidden', s !== 'gameover');
     clickToPlay.classList.toggle('hidden', !(s === 'playing' && !game.input.locked));
     if (s === 'paused') {
@@ -247,7 +281,9 @@ function boot(): void {
 
   el('btn-play').addEventListener('click', () => void startRun());
   el('btn-howto').addEventListener('click', () => showPanel('howto'));
-  el('btn-settings').addEventListener('click', () => showPanel('settings'));
+  el('btn-settings').addEventListener('click', () => openSettings('menu'));
+  el('btn-pause-settings').addEventListener('click', () => openSettings('pause'));
+  el('btn-settings-back').addEventListener('click', () => closeSettings());
   for (const back of document.querySelectorAll('.btn.back')) {
     back.addEventListener('click', () => showPanel('main'));
   }
@@ -279,7 +315,9 @@ function boot(): void {
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Escape') {
-      if (game.state === 'playing') game.pause();
+      // Esc backs out one level: settings, then the pause menu, then into play.
+      if (settingsFrom) closeSettings();
+      else if (game.state === 'playing') game.pause();
       else if (game.state === 'paused') {
         game.resumeGame();
         game.input.requestLock();

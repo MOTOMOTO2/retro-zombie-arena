@@ -97,7 +97,7 @@ type Drop = {
   alive: boolean;
 };
 
-const BLOOD_COLOR = new THREE.Color(0x8f1410);
+const BLOOD_COLOR = new THREE.Color(0xa01810);
 const SPARK_COLOR = new THREE.Color(0xffd48a);
 const DUST_COLOR = new THREE.Color(0x9a9282);
 const EMBER_COLOR = new THREE.Color(0xff8a2a);
@@ -784,7 +784,7 @@ export class Game {
       const falloff = 1 - d / radius;
       this.damageEnemy(
         e, damage * falloff * falloff, false, true,
-        new THREE.Vector3(e.x, e.headY, e.z),
+        new THREE.Vector3(e.x, e.headY, e.z), { x, z },
       );
     });
 
@@ -796,20 +796,44 @@ export class Game {
     }
   }
 
+  /**
+   * Applies a hit. `from` is where it came from - the player for bullets, the
+   * blast centre for explosions - which decides which way the body reels,
+   * falls and sprays.
+   */
   private damageEnemy(
     e: Enemy, amount: number, head: boolean, explosive: boolean, at: THREE.Vector3,
+    from: { x: number; z: number } = this.player,
   ): void {
-    const res = e.applyDamage(amount, head, explosive);
+    let dirX = e.x - from.x;
+    let dirZ = e.z - from.z;
+    const len = Math.hypot(dirX, dirZ) || 1;
+    dirX /= len;
+    dirZ /= len;
+    const res = e.applyDamage(amount, head, explosive, dirX, dirZ);
     if (res.damageDealt <= 0) return;
 
     const doublePoints = this.activePowerups.has('doublepoints');
     const gore = res.killed ? (res.gibbed ? 26 : 14) : head ? 9 : 5;
+    // Blood sprays out the far side, the way the round was travelling.
     for (let i = 0; i < gore; i++) {
+      const out = this.rng.range(1, 8);
       this.particles.spawn(
         at.x, at.y, at.z,
-        this.rng.range(-7, 7), this.rng.range(1, 11), this.rng.range(-7, 7),
+        dirX * out + this.rng.range(-3.5, 3.5), this.rng.range(1, 10), dirZ * out + this.rng.range(-3.5, 3.5),
         BLOOD_COLOR, this.rng.range(0.3, 0.95), 28,
       );
+    }
+    if (res.headless) {
+      // The head is gone: a fountain from the neck.
+      for (let i = 0; i < 22; i++) {
+        this.particles.spawn(
+          e.x, e.headY - 0.35, e.z,
+          this.rng.range(-2.5, 2.5) + dirX * 2, this.rng.range(6, 13), this.rng.range(-2.5, 2.5) + dirZ * 2,
+          BLOOD_COLOR, this.rng.range(0.5, 1.1), 26,
+        );
+      }
+      audio.flesh({ x: e.x, z: e.z }, true);
     }
     this.placeDecal(e.x, 0.04, e.z, 0, 0, true, this.rng.range(1.4, 2.6));
     audio.flesh({ x: e.x, z: e.z }, res.killed);
@@ -1415,6 +1439,14 @@ export class Game {
     }
 
     this.pool.resolveCrowding(this.grid, this.torn);
+
+    // A body lost far away out of sight goes back in the queue and comes in
+    // through a window nearer the player, so the horde never loses the scent.
+    for (const e of this.pool.all) {
+      if (!e.active || !e.lost) continue;
+      e.retire();
+      this.spawned = Math.max(0, this.spawned - 1);
+    }
 
     const probe = this.level.probe;
     for (const e of this.pool.all) {

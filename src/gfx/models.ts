@@ -394,7 +394,9 @@ export function buildHound(): ZombieModel {
 export class ParticleField {
   readonly points: THREE.Points;
   private readonly positions: Float32Array;
+  /** Each particle's own colour; the geometry holds the faded copy that is drawn. */
   private readonly colors: Float32Array;
+  private readonly shown: Float32Array;
   private readonly vel: Float32Array;
   private readonly life: Float32Array;
   private readonly maxLife: Float32Array;
@@ -406,6 +408,7 @@ export class ParticleField {
     this.count = count;
     this.positions = new Float32Array(count * 3);
     this.colors = new Float32Array(count * 3);
+    this.shown = new Float32Array(count * 3);
     this.vel = new Float32Array(count * 3);
     this.life = new Float32Array(count);
     this.maxLife = new Float32Array(count);
@@ -413,7 +416,7 @@ export class ParticleField {
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(this.shown, 3));
     geo.setDrawRange(0, count);
 
     const mat = new THREE.PointsMaterial({
@@ -447,6 +450,9 @@ export class ParticleField {
     this.colors[i * 3] = color.r;
     this.colors[i * 3 + 1] = color.g;
     this.colors[i * 3 + 2] = color.b;
+    this.shown[i * 3] = color.r;
+    this.shown[i * 3 + 1] = color.g;
+    this.shown[i * 3 + 2] = color.b;
     this.life[i] = life;
     this.maxLife[i] = life;
     this.gravity[i] = gravity;
@@ -460,9 +466,9 @@ export class ParticleField {
       this.life[i] -= dt;
       if (this.life[i] <= 0) {
         this.positions[i * 3 + 1] = -999;
-        this.colors[i * 3] = 0;
-        this.colors[i * 3 + 1] = 0;
-        this.colors[i * 3 + 2] = 0;
+        this.shown[i * 3] = 0;
+        this.shown[i * 3 + 1] = 0;
+        this.shown[i * 3 + 2] = 0;
         continue;
       }
       this.vel[i * 3 + 1] -= this.gravity[i] * dt;
@@ -475,11 +481,14 @@ export class ParticleField {
         this.vel[i * 3 + 1] = 0;
         this.vel[i * 3 + 2] *= 0.4;
       }
+      // Darken a little as it dies. (This used to multiply the stored colour
+      // in place every frame, which turned every particle black within a few
+      // frames of spawning.)
       const t = this.life[i] / this.maxLife[i];
-      const geoColor = this.points.geometry.attributes.color as THREE.BufferAttribute;
-      geoColor.array[i * 3 + 0] = this.colors[i * 3] * t;
-      geoColor.array[i * 3 + 1] = this.colors[i * 3 + 1] * t;
-      geoColor.array[i * 3 + 2] = this.colors[i * 3 + 2] * t;
+      const k = 0.45 + 0.55 * t;
+      this.shown[i * 3] = this.colors[i * 3] * k;
+      this.shown[i * 3 + 1] = this.colors[i * 3 + 1] * k;
+      this.shown[i * 3 + 2] = this.colors[i * 3 + 2] * k;
     }
     if (any) {
       (this.points.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;

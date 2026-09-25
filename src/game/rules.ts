@@ -55,16 +55,20 @@ export function spawnInterval(round: number): number {
   return Math.max(0.22, 2.1 - round * 0.105);
 }
 
-/** Base walk speed in world units per second. */
+/**
+ * Base walk speed in world units per second (two units to the metre). A
+ * round-one walker covers about 1.6 m/s - a purposeful shamble, not a stroll -
+ * and by the late rounds most of them are jogging.
+ */
 export function enemySpeed(round: number, kind: EnemyKind): number {
   const ramp = Math.min(3.6, round * 0.17);
   switch (kind) {
     case 'walker':
-      return 2.5 + ramp * 0.7;
+      return 3.2 + ramp * 0.8;
     case 'runner':
-      return 4.6 + ramp * 0.75;
+      return 5.4 + ramp * 0.75;
     case 'brute':
-      return 2.2 + ramp * 0.45;
+      return 2.8 + ramp * 0.5;
     case 'hound':
       return 7.4 + Math.min(1.6, round * 0.05);
   }

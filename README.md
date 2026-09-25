@@ -71,7 +71,7 @@ uses Pointer Lock, so it needs a desktop browser.
 | `1` `2` / `Q` / mouse wheel | Swap weapon |
 | `Tab` | Map |
 | `M` | Mute |
-| `Esc` | Pause |
+| `Esc` | Pause (settings are in the pause menu; `Esc` backs out) |
 
 ## How a run works
 
@@ -150,11 +150,13 @@ src/
     game.ts            the loop that ties it together
 test/
   logic.test.ts        32 unit tests over the pure half of the game
-  browser-smoke.mjs    63 checks driving the real game in headless Chromium
+  browser-smoke.mjs    82 checks driving the real game in headless Chromium
 tools/
   mapcheck.mjs         prints a generated asylum as ASCII, or sweeps many seeds
   diag.mjs             screenshots every room of a seed, the horde and a reload
   guns.mjs             contact sheets of every weapon: hip, sights, reload
+  deaths.mjs           contact sheet of hit reactions and every kind of death
+  pursuit.mjs          times how fast a scattered horde finds the player
 docs/                  the screenshots above
 ```
 
@@ -193,10 +195,25 @@ colour steps land where the eye can see them. Anything brighter than white -
 lamp tubes, zombie eyes, muzzle flashes - blooms.
 
 **Pathing is a flow field, not per-enemy A\*.** A breadth-first search from the
-player's tile is rebuilt about seven times a second over ~2900 cells. Every
-zombie then reads one lookup per frame, steers toward the centre of the next
-tile, and gets pushed apart by a separation pass. A whole horde routes perfectly
-and identically, which is exactly what makes training them in a circle work.
+player's tile is rebuilt about seven times a second over ~2900 cells, and every
+zombie reads it. Each one thinks a few times a second: with the player in plain
+sight - checked with a ray down the middle and one along each shoulder, so it
+never tries to squeeze round a corner it cannot fit past - it walks straight at
+them; otherwise it follows the field a few tiles ahead and heads for the
+farthest point it can reach in a straight line, so paths cut corners smoothly.
+A body that stops making progress steps to the best neighbouring tile, and one
+that has been far away, out of sight and getting no closer for six seconds is
+recycled through a window nearer the player, so the horde never loses the
+scent. `tools/pursuit.mjs` scatters zombies over a fully opened asylum and
+times how long they take to find you.
+
+**Hits and deaths have weight.** A hit rocks the body away from the shot on a
+spring, snaps the head back on a headshot, staggers it for a moment and shoves
+it back. A kill picks a death - thrown on its back, pitched onto its face,
+buckling at the knees and keeling over, or launched and tumbling by an
+explosion - and a headshot kill takes the head clean off. Bodies stay down for a
+couple of seconds before they sink through the floor. `tools/deaths.mjs`
+renders a contact sheet of all of it.
 
 **The guns are modelled, not imported.** `guns.ts` builds each weapon in
 metres from its real-world reference - M1911, Thompson M1928 with the drum, M3
@@ -235,7 +252,7 @@ npm test              # 32 unit tests (node:test, runs .ts directly)
 npm run map           # prints a random asylum and validates it
 npm run map -- --sweep 1000   # generates and validates a thousand seeds
 npm run build         # type-check + bundle
-npm run test:browser  # builds, then runs 63 checks in real headless Chromium
+npm run test:browser  # builds, then runs 82 checks in real headless Chromium
 ```
 
 `npm test` covers the pure half: that 300 generated asylums each pass every
@@ -261,9 +278,12 @@ counter advanced; pauses and resumes; kills the player and checks the run
 reports stats; starts six runs and checks each got a different asylum, that a
 seed replays and that rebuilding the world does not leak GPU memory; reloads
 every weapon from empty and checks the animation finishes, refills the gun and
-cues its foley; aims the scoped rifle; and sounds every kind of zombie voice
-through a real AudioContext and floods the voice limiter — then asserts no
-console or page errors throughout.
+cues its foley; aims the scoped rifle; opens settings from the pause menu,
+changes one live and backs out with Esc; scatters a dozen zombies over an open
+asylum and checks every one finds the player; checks a hit rocks and shoves a
+body and a kill drops it, leaves it on the floor, then cleans it up; and sounds
+every kind of zombie voice through a real AudioContext and floods the voice
+limiter — then asserts no console or page errors throughout.
 
 It needs Chromium once: `npx playwright install chromium`.
 

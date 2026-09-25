@@ -315,6 +315,16 @@ html, body {
   z-index: 10;
 }
 
+/* In-game menus let the paused frame show through, so a brightness or graphics
+   change can be judged against the real picture behind it. */
+.overlay.see-through {
+  background: radial-gradient(ellipse at center, rgba(8, 4, 4, 0.35) 0%, rgba(4, 4, 6, 0.72) 75%);
+}
+.overlay.see-through .scanlines { opacity: 0.35; }
+.overlay.see-through .panel { background: rgba(6, 6, 8, 0.82); }
+
+.hint { font-size: 11px; letter-spacing: 0.25em; opacity: 0.5; }
+
 .scanlines {
   position: absolute;
   inset: 0;

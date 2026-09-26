@@ -7,3 +7,4 @@ tools/shots/
 test/screenshot.png
 tools/.kokoro/
 tools/.voicegen/
+__pycache__/

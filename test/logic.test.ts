@@ -20,6 +20,7 @@ import {
   zoneAt,
 } from '../src/world/mapdata.ts';
 import { NavGrid } from '../src/world/grid.ts';
+import { DEFAULT_KEYS, REBINDABLE, bindable, keyLabel } from '../src/core/input.ts';
 import { GUN_IDS } from '../src/gfx/guns.ts';
 import { Rng } from '../src/core/rng.ts';
 import {
@@ -745,5 +746,53 @@ describe('threat', () => {
 
   it('each chapter carries its own threat', () => {
     MAP_ORDER.forEach((id, i) => assert.equal(new Quest(id).threat, i));
+  });
+});
+
+describe('key bindings', () => {
+  it('names every key the way a player would read it', () => {
+    assert.equal(keyLabel('KeyW'), 'W');
+    assert.equal(keyLabel('Digit1'), '1');
+    assert.equal(keyLabel('Space'), 'SPACE');
+    assert.equal(keyLabel('ShiftLeft'), 'L SHIFT');
+    assert.equal(keyLabel('ArrowUp'), 'UP');
+    assert.equal(keyLabel('Numpad0'), 'NUM 0');
+    assert.equal(keyLabel('Comma'), ',');
+    // Nothing comes out blank, whatever the keyboard sends.
+    assert.ok(keyLabel('IntlBackslash').length > 0);
+  });
+
+  it('every action has a default, and every offered action is real', () => {
+    for (const { action, name } of REBINDABLE) {
+      assert.ok(DEFAULT_KEYS[action]?.length, `${action} has no default key`);
+      assert.ok(name.length > 0);
+    }
+    // Pause is deliberately not on offer: Esc is the way out of every screen.
+    assert.ok(!REBINDABLE.some((r) => r.action === 'pause'));
+  });
+
+  it('no key does two jobs out of the box', () => {
+    const seen = new Map<string, string>();
+    for (const [action, codes] of Object.entries(DEFAULT_KEYS)) {
+      for (const code of codes) {
+        assert.equal(seen.get(code), undefined, `${code} is bound to both ${seen.get(code)} and ${action}`);
+        seen.set(code, action);
+      }
+    }
+  });
+
+  it('will not hand over the keys the game or the browser needs', () => {
+    for (const code of ['Escape', 'F5', 'F11', 'F12', 'MetaLeft']) {
+      assert.equal(bindable(code), false, `${code} should not be bindable`);
+    }
+    assert.equal(bindable(''), false);
+    assert.equal(bindable('KeyZ'), true);
+    // Everything the defaults use must itself be bindable, or a reset would drop it.
+    for (const codes of Object.values(DEFAULT_KEYS)) {
+      for (const code of codes) {
+        if (code === 'Escape') continue;
+        assert.ok(bindable(code), `default key ${code} is not bindable`);
+      }
+    }
   });
 });

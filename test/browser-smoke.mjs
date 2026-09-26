@@ -837,6 +837,104 @@ try {
   check('health bars and damage numbers can be turned off', tags.numbersOff === 0 && tags.barsOff === 0, `${tags.numbersOff} numbers, ${tags.barsOff} bars`);
   check("the numbers and the dead zombie's bar clear away", tags.after.bars === 0 && tags.after.numbers === 0, JSON.stringify(tags.after));
 
+  // ------------------------------------------- which way the hit came from
+  const hurt = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    game.newRun(777);
+    const p = game.player;
+    const dir = document.getElementById('damage-dir');
+    // The wedge sits on a zero-sized box in the middle of the screen, so its
+    // rotation is the bearing the game read off the hit.
+    const wedge = () => {
+      const deg = /rotate\(([-\d.]+)deg\)/.exec(dir.style.transform);
+      return { deg: deg ? Math.round(Number(deg[1])) : null, shown: dir.style.opacity === '1' };
+    };
+    const from = (dx, dz) => {
+      p.health = p.maxHealth;
+      game.hurtPlayer(5, { x: p.x + dx, z: p.z + dz });
+      return wedge();
+    };
+    const out = {};
+    p.yaw = 0; // facing -z
+    out.ahead = from(0, -10);
+    out.behind = from(0, 10);
+    out.right = from(10, 0);
+    out.left = from(-10, 0);
+    // Turned a quarter turn, the same attacker is off to one side: facing -x,
+    // something standing at -z is on the player's right.
+    p.yaw = Math.PI / 2;
+    out.turned = from(0, -10);
+    // Your own grenade, or ground you are standing in, has no bearing to show.
+    dir.style.opacity = '0';
+    p.health = p.maxHealth;
+    game.hurtPlayer(5);
+    out.noDirection = wedge();
+    return out;
+  });
+  check('a hit from ahead points up', hurt.ahead.deg === 0 && hurt.ahead.shown, JSON.stringify(hurt.ahead));
+  check('a hit from behind points down', Math.abs(hurt.behind.deg) === 180, JSON.stringify(hurt.behind));
+  check('a hit from the right points right', hurt.right.deg === 90, JSON.stringify(hurt.right));
+  check('a hit from the left points left', hurt.left.deg === -90, JSON.stringify(hurt.left));
+  check('the wedge follows where the player is facing', hurt.turned.deg === 90, JSON.stringify(hurt.turned));
+  check('damage with no direction shows no wedge', hurt.noDirection.shown === false, JSON.stringify(hurt.noDirection));
+
+  // --------------------------------------------------------- rebinding keys
+  const keys = await page.evaluate(async () => {
+    const { game } = window.__RZA;
+    const out = {};
+    const shown = (id) => !document.getElementById(id).classList.contains('hidden');
+    const press = (code) => window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true }));
+    const rows = () => [...document.querySelectorAll('#key-rows .bind')];
+    const rowFor = (name) => rows().find((r) => r.querySelector('span').textContent === name);
+
+    game.abandon();
+    document.getElementById('btn-settings').click();
+    document.getElementById('btn-controls').click();
+    out.panelOpens = shown('menu-controls') && rows().length > 10;
+    out.listsDefault = rowFor('JUMP').querySelector('button').textContent === 'SPACE';
+
+    // Click the row, then press the key: the list and the bindings both follow.
+    rowFor('JUMP').querySelector('button').click();
+    out.waitsForAKey = rowFor('JUMP').querySelector('button').textContent === 'PRESS A KEY';
+    press('KeyB');
+    out.rebound = rowFor('JUMP').querySelector('button').textContent === 'B'
+      && game.input.keysFor('jump').join() === 'KeyB';
+    out.oldKeyDead = !game.input.keysFor('jump').includes('Space');
+
+    // Taking a key off another action leaves that one usable, not blank.
+    rowFor('RELOAD').querySelector('button').click();
+    press('KeyB');
+    out.clashTakesTheKey = game.input.keysFor('reload').join() === 'KeyB';
+    out.clashLeavesTheOtherUsable = game.input.keysFor('jump').length > 0
+      && !game.input.keysFor('jump').includes('KeyB');
+
+    // Esc cancels a rebind instead of closing the screen.
+    rowFor('KNIFE').querySelector('button').click();
+    press('Escape');
+    out.escCancels = shown('menu-controls')
+      && rowFor('KNIFE').querySelector('button').textContent !== 'PRESS A KEY';
+
+    // The HOW TO PLAY list and the in-game prompt are written from the bindings.
+    rowFor('BUY / USE / REPAIR').querySelector('button').click();
+    press('KeyH');
+    out.howtoFollows = document.getElementById('howto-use').textContent === 'H'
+      && [...document.querySelectorAll('#howto-keys li')].some((li) => li.textContent === 'H buy / use / repair');
+
+    // It survives a reload: the settings are saved as they are changed.
+    out.saved = JSON.parse(localStorage.getItem('rza.settings.v2')).keys.use.join() === 'KeyH';
+
+    document.getElementById('btn-keys-reset').click();
+    out.resetRestoresDefaults = game.input.keysFor('jump').join() === 'Space'
+      && game.input.keysFor('use').join() === 'KeyF,KeyE'
+      && document.getElementById('howto-use').textContent === 'F';
+    out.resetClearsTheSave = Object.keys(JSON.parse(localStorage.getItem('rza.settings.v2')).keys).length === 0;
+
+    document.getElementById('btn-controls-back').click();
+    document.getElementById('btn-settings-back').click();
+    return out;
+  });
+  for (const [k, v] of Object.entries(keys)) check(`keys: ${k}`, v === true);
+
   // ------------------------------------------------------------ four maps
   const sweep = await page.evaluate(() => {
     const { game } = window.__RZA;

@@ -78,16 +78,43 @@ export function recordRun(p: Progress, map: MapId, r: RunResult): { unlocked: Ma
   return { unlocked, best };
 }
 
+/** A whole number from stored data, whatever it turns out to be. */
+function count(v: unknown): number {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * A record as this build understands it. Saved progress outlives the build that
+ * wrote it, and a half-written or hand-edited entry would otherwise put NaN and
+ * undefined straight onto the chapter cards, so every field is rebuilt here.
+ */
+function cleanRecord(raw: unknown): MapRecord | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const escaped = r.escaped === true;
+  return {
+    bestRound: count(r.bestRound),
+    bestKills: count(r.bestKills),
+    bestPoints: count(r.bestPoints),
+    escaped,
+    // A map can only have a fastest escape if it was ever escaped.
+    fastestEscape: escaped ? count(r.fastestEscape) : 0,
+  };
+}
+
 export function loadProgress(): Progress {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return defaultProgress();
     const parsed = JSON.parse(raw) as Partial<Progress>;
     const p = defaultProgress();
-    for (const m of parsed.unlocked ?? []) if (MAP_ORDER.includes(m) && !p.unlocked.includes(m)) p.unlocked.push(m);
+    if (Array.isArray(parsed.unlocked)) {
+      for (const m of parsed.unlocked) if (MAP_ORDER.includes(m) && !p.unlocked.includes(m)) p.unlocked.push(m);
+    }
     for (const m of MAP_ORDER) {
-      const rec = parsed.records?.[m];
-      if (rec) p.records[m] = { ...rec };
+      const rec = cleanRecord(parsed.records?.[m]);
+      if (rec) p.records[m] = rec;
     }
     return p;
   } catch {

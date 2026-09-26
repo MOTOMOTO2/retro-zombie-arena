@@ -249,9 +249,15 @@ export const NUKE_SCORE = 400;
 export const CARPENTER_SCORE = 200;
 export const POWERUP_LIFETIME = 25;
 
-/** Roughly one drop per 45 kills, with a hard floor between drops. */
-export const DROP_CHANCE = 0.022;
+/**
+ * Power-up drops: no drop at all until this many kills since the last one, and
+ * then this chance per kill. That works out at roughly one drop per 24 kills -
+ * the twelve dead it takes to arm the roll, plus about twelve more to win it.
+ */
+export const DROP_CHANCE = 0.085;
 export const DROP_MIN_GAP = 12; // kills
+/** However well the rolls go, a round only gives up so much. */
+export const DROPS_PER_ROUND = 4;
 
 export const MYSTERY_BOX_COST = 950;
 /** After this many pulls the box packs up and moves on. */

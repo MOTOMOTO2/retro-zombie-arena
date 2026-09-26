@@ -58,7 +58,7 @@ import {
 import { MAPS, MAP_ORDER } from '../src/world/maps.ts';
 import { BOSS_DELAY, Quest } from '../src/game/quest.ts';
 import { CHAPTERS, UNLOCK_ROUND, beatsFor } from '../src/game/story.ts';
-import { defaultProgress, isUnlocked, nextMap, recordRun } from '../src/game/progress.ts';
+import { defaultProgress, isUnlocked, loadProgress, nextMap, recordRun } from '../src/game/progress.ts';
 import { BOSSES, bossHealth } from '../src/game/boss.ts';
 
 /** Every generated asylum must pass every rule; sweep a few hundred of them. */
@@ -794,5 +794,85 @@ describe('key bindings', () => {
         assert.ok(bindable(code), `default key ${code} is not bindable`);
       }
     }
+  });
+});
+
+describe('saved progress', () => {
+  /** Stands in for localStorage, which node has no opinion about. */
+  const fakeStorage = (value: string | null) => ({
+    getItem: () => value,
+    setItem: () => {},
+    removeItem: () => {},
+    clear: () => {},
+    key: () => null,
+    length: 0,
+  });
+
+  const loadFrom = (raw: string | null): ReturnType<typeof loadProgress> => {
+    const g = globalThis as { localStorage?: unknown };
+    const had = 'localStorage' in g;
+    const before = g.localStorage;
+    g.localStorage = fakeStorage(raw);
+    try {
+      return loadProgress();
+    } finally {
+      if (had) g.localStorage = before;
+      else delete g.localStorage;
+    }
+  };
+
+  it('a fresh player gets only the first chapter', () => {
+    assert.deepEqual(loadFrom(null).unlocked, [MAP_ORDER[0]]);
+  });
+
+  it('reads back what it saved', () => {
+    const p = defaultProgress();
+    recordRun(p, 'asylum', { round: 12, kills: 200, points: 30000, escaped: true });
+    const back = loadFrom(JSON.stringify(p));
+    assert.deepEqual(back.unlocked, p.unlocked);
+    assert.deepEqual(back.records.asylum, p.records.asylum);
+  });
+
+  it('nonsense in storage does not become nonsense on the chapter cards', () => {
+    for (const raw of ['', 'not json', 'null', '[]', '{"records":7}', '{"unlocked":"town"}']) {
+      const p = loadFrom(raw);
+      assert.deepEqual(p.unlocked, [MAP_ORDER[0]], raw);
+      assert.deepEqual(p.records, {}, raw);
+    }
+  });
+
+  it('a half-written record is rebuilt rather than trusted', () => {
+    const p = loadFrom(JSON.stringify({
+      unlocked: ['asylum', 'town', 'nowhere'],
+      records: { asylum: { bestRound: 'lots', escaped: 'yes', fastestEscape: -3 } },
+    }));
+    // A map that no longer exists is dropped; the real ones survive.
+    assert.deepEqual(p.unlocked, ['asylum', 'town']);
+    const rec = p.records.asylum;
+    assert.ok(rec);
+    // Every number is a number, and nothing claims an escape it cannot back up.
+    for (const n of [rec.bestRound, rec.bestKills, rec.bestPoints, rec.fastestEscape]) {
+      assert.equal(Number.isFinite(n), true);
+      assert.ok(n >= 0);
+    }
+    assert.equal(rec.escaped, false);
+    assert.equal(rec.fastestEscape, 0);
+  });
+
+  it('a record only keeps a fastest escape if it ever escaped', () => {
+    const p = loadFrom(JSON.stringify({
+      records: { asylum: { bestRound: 9, escaped: false, fastestEscape: 4 } },
+    }));
+    assert.equal(p.records.asylum?.fastestEscape, 0);
+  });
+
+  it('the same round with more points is still a new best', () => {
+    const p = defaultProgress();
+    recordRun(p, 'asylum', { round: 8, kills: 90, points: 10000, escaped: false });
+    assert.equal(recordRun(p, 'asylum', { round: 8, kills: 95, points: 14000, escaped: false }).best, true);
+    assert.equal(p.records.asylum?.bestPoints, 14000);
+    // A worse run leaves the record alone.
+    assert.equal(recordRun(p, 'asylum', { round: 8, kills: 10, points: 900, escaped: false }).best, false);
+    assert.equal(p.records.asylum?.bestPoints, 14000);
   });
 });

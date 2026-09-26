@@ -370,13 +370,17 @@ function boot(): void {
   };
 
   /** Records a finished run, returning the note to show if it opened a new map. */
-  const record = (stats: RunStats): string | null => {
+  /** Records a finished run: the note to show if it opened a new map, and whether it was a best. */
+  const record = (stats: RunStats): { note: string | null; best: boolean } => {
     const res = recordRun(progress, stats.map, {
       round: stats.round, kills: stats.kills, points: stats.points, escaped: stats.escaped,
     });
     saveProgress(progress);
     renderBest();
-    return res.unlocked ? `NEW CHAPTER UNLOCKED: ${MAPS[res.unlocked].name}` : null;
+    return {
+      note: res.unlocked ? `NEW CHAPTER UNLOCKED: ${MAPS[res.unlocked].name}` : null,
+      best: res.best,
+    };
   };
 
   const showUnlock = (id: string, note: string | null): void => {
@@ -520,8 +524,9 @@ function boot(): void {
   };
 
   game.onGameOver = (stats: RunStats) => {
-    const before = progress.records[stats.map]?.bestRound ?? 0;
-    const note = record(stats);
+    // recordRun decides what counts as a best - the same round with more points
+    // does - so the banner takes its word for it rather than guessing again.
+    const { note, best: isBest } = record(stats);
     const best = progress.records[stats.map]?.bestRound ?? stats.round;
     el('go-stats').innerHTML = statsRows([
       ['CHAPTER', `${CHAPTERS[stats.map].number}: ${CHAPTERS[stats.map].title}`],
@@ -531,12 +536,12 @@ function boot(): void {
       ['POINTS EARNED', String(stats.points)],
       ['TIME', fmtTime(stats.seconds)],
       ['BEST ROUND HERE', String(best)],
-    ]) + (stats.round > before ? '<div style="color:#ffc84d;margin-top:10px">NEW PERSONAL BEST</div>' : '');
+    ]) + (isBest ? '<div style="color:#ffc84d;margin-top:10px">NEW PERSONAL BEST</div>' : '');
     showUnlock('go-unlock', note);
   };
 
   game.onVictory = (stats: RunStats) => {
-    const note = record(stats);
+    const { note } = record(stats);
     const c = CHAPTERS[stats.map];
     const last = !nextMap(stats.map);
     el('win-chapter').textContent = `CHAPTER ${c.number}: ${c.title}  \u00b7  COMPLETE`;
@@ -632,6 +637,8 @@ function boot(): void {
   }, { capture: true });
 
   window.addEventListener('keydown', (e) => {
+    // Both of these toggle, so a held key must not fire them over and over.
+    if (e.repeat) return;
     if (e.code === 'Escape') {
       // Esc backs out one level: the key list, then settings, then the pause
       // menu, then into play.

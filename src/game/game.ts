@@ -46,6 +46,9 @@ import { Hud, type MinimapBlip } from './hud.ts';
 import { EYE_HEIGHT, Player } from './player.ts';
 import {
   CARPENTER_SCORE,
+  DROPS_PER_ROUND,
+  DROP_CHANCE,
+  DROP_MIN_GAP,
   MYSTERY_BOX_COST,
   NUKE_SCORE,
   PERK_INFO,
@@ -54,6 +57,7 @@ import {
   POWERUPS,
   POWERUP_IDS,
   POWERUP_LIFETIME,
+  SCORE_REPAIR,
   planRound,
   roundBonus,
   scoreForHit,
@@ -1286,9 +1290,9 @@ export class Game {
 
   private maybeDropPowerUp(x: number, z: number): void {
     this.killsSinceDrop++;
-    if (this.dropsThisRound >= 4) return;
-    if (this.killsSinceDrop < 12) return;
-    if (!this.rng.chance(0.085)) return;
+    if (this.dropsThisRound >= DROPS_PER_ROUND) return;
+    if (this.killsSinceDrop < DROP_MIN_GAP) return;
+    if (!this.rng.chance(DROP_CHANCE)) return;
 
     this.killsSinceDrop = 0;
     this.dropsThisRound++;
@@ -2446,9 +2450,8 @@ export class Game {
             if (b.addBoard()) {
               this.torn.delete(this.grid.idx(b.def.tx, b.def.tz));
               this.grid.invalidateField();
-              const award = 10;
-              p.award(award);
-              this.hud.pointsDelta(award);
+              p.award(SCORE_REPAIR);
+              this.hud.pointsDelta(SCORE_REPAIR);
               this.hud.setPoints(p.points);
               audio.boardBreak({ x: b.center.x, z: b.center.z });
             }

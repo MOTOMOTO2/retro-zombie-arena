@@ -209,6 +209,34 @@ html, body {
   transition: opacity 0.35s;
 }
 
+/*
+ * Which way the hit came from. A wedge on a ring around the crosshair, rotated
+ * to the bearing of whatever landed it: straight up is dead ahead, so a bite
+ * from behind puts it under your feet, where you look for it.
+ *
+ * The outer element is a zero-sized box pinned to the middle of the screen, so
+ * rotating it swings the wedge around the centre.
+ */
+#damage-dir {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+#damage-dir i {
+  position: absolute;
+  left: -84px;
+  top: -152px;
+  width: 168px;
+  height: 52px;
+  background: radial-gradient(ellipse at 50% 120%, rgba(255, 82, 52, 0.95), rgba(255, 48, 30, 0) 76%);
+  clip-path: polygon(50% 100%, 6% 8%, 94% 8%);
+}
+
 #low-health {
   position: absolute;
   inset: 0;
@@ -597,6 +625,59 @@ html, body {
 /* ------------------------------------------------------- chapters */
 
 .panel.wide { max-width: 780px; margin: 0 auto; }
+
+/* The rebinding list: an action a line, its key in a box you click to change. */
+.keybinds {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 4px 28px;
+  width: 100%;
+}
+
+.keybinds .bind {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  padding: 3px 0;
+}
+
+.keybinds .bind > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keybinds .bind button {
+  font-family: var(--font);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  color: var(--amber);
+  background: rgba(20, 20, 24, 0.9);
+  border: 2px solid rgba(232, 226, 206, 0.25);
+  padding: 4px 10px;
+  min-width: 124px;
+  cursor: pointer;
+  flex: none;
+}
+
+.keybinds .bind button:hover, .keybinds .bind button:focus-visible {
+  border-color: var(--bone);
+  color: #fff;
+  outline: none;
+}
+
+/* Waiting for the key to bind. */
+.keybinds .bind button.listening {
+  color: #fff;
+  background: var(--blood);
+  border-color: var(--bone);
+}
+
+/* The key the player just pressed is already spoken for somewhere else. */
+.keybinds .bind.clash button { border-color: var(--blood); }
 
 .cards {
   display: grid;

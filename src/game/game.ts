@@ -247,6 +247,13 @@ export class Game {
   private killsSinceDrop = 0;
   private dropsThisRound = 0;
 
+  /**
+   * True when the host frame loop calls `present()` itself, once per drawn
+   * frame. Anything that drives `update()` on its own - the headless smoke
+   * test - leaves this false and gets the HUD refreshed on every step.
+   */
+  hostPresents = false;
+
   private repairHold = 0;
   private legendaryFlash = 0;
   private fieldTimer = 0;
@@ -539,6 +546,7 @@ export class Game {
     this.damageFlash = 0;
 
     this.hud.show(true);
+    this.hud.clearDamage();
     this.hud.setPoints(this.player.points);
     this.hud.setRound(1);
     this.hud.toggleMap(false);
@@ -1233,16 +1241,35 @@ export class Game {
     this.beats(this.quest.harvest());
   }
 
-  private hurtPlayer(amount: number): void {
+  /**
+   * Takes health off the player. `from` is where the hit came from, when there
+   * is a direction worth pointing at - a swing, a shockwave, something thrown -
+   * and puts a wedge on that side of the crosshair. It is left out for damage
+   * that has no bearing: your own grenade, or ground you are standing in.
+   */
+  private hurtPlayer(amount: number, from?: { x: number; z: number }): void {
     if (amount <= 0 || !this.player.alive) return;
     const died = this.player.takeDamage(amount);
     this.damageFlash = Math.min(1, this.damageFlash + amount / 70);
-    this.hud.damageFlash();
+    this.hud.damageFlash(from ? this.bearingTo(from) : null);
     this.hud.setHealth(this.player.healthFraction);
     audio.hurt(amount, this.player.healthFraction);
     if (!died && this.player.healthFraction < 0.35) audio.callout('hurt', 0.45);
     this.shake = Math.max(this.shake, 1.4);
     if (died) this.die();
+  }
+
+  /**
+   * Which way a point lies from the player, in radians clockwise off the way
+   * they are facing: 0 is dead ahead, +/-PI is behind. Same yaw convention as
+   * the camera and the ears - yaw 0 looks down -z, +x is to the right.
+   */
+  private bearingTo(at: { x: number; z: number }): number {
+    const dx = at.x - this.player.x;
+    const dz = at.z - this.player.z;
+    const s = Math.sin(this.player.yaw);
+    const c = Math.cos(this.player.yaw);
+    return Math.atan2(dx * c - dz * s, -dx * s - dz * c);
   }
 
   private die(): void {
@@ -1712,7 +1739,7 @@ export class Game {
         // A jump clears the shockwave.
         if (d < radius && this.player.y < 0.8 && this.player.alive) {
           const k = 1 - d / radius;
-          this.hurtPlayer(Math.round(damage * (0.45 + 0.55 * k)));
+          this.hurtPlayer(Math.round(damage * (0.45 + 0.55 * k)), b);
           this.knockPlayer(b.x, b.z, 8 + 14 * k);
         }
       },
@@ -1754,7 +1781,7 @@ export class Game {
         else audio.zombieVoice(at, move === 'leap' ? 'scream' : move === 'throw' ? 'snarl' : 'growl', 0.5);
       },
       strike: (b, damage, knock) => {
-        this.hurtPlayer(damage);
+        this.hurtPlayer(damage, b);
         this.knockPlayer(b.x, b.z, knock);
         audio.slam({ x: b.x, z: b.z });
         this.shake = Math.max(this.shake, 3.2);
@@ -1847,7 +1874,7 @@ export class Game {
     if (fire) audio.fireBurst({ x, z });
     else audio.flesh({ x, z }, true);
     const d = Math.hypot(this.player.x - x, this.player.z - z);
-    if (d < 4.2 && this.player.y < y + 3) this.hurtPlayer(Math.round(30 * (1 - (d / 4.2) * 0.6)));
+    if (d < 4.2 && this.player.y < y + 3) this.hurtPlayer(Math.round(30 * (1 - (d / 4.2) * 0.6)), { x, z });
     // Whatever lands leaves the ground burning or bubbling for a while.
     const radius = fire ? 3.4 : 3.0;
     const mat = new THREE.MeshBasicMaterial({
@@ -2318,9 +2345,9 @@ export class Game {
 
   update(dt: number): void {
     this.elapsed += dt;
-    this.hud.update(dt);
 
     if (this.state !== 'playing') {
+      if (!this.hostPresents) this.present(dt);
       this.input.endFrame();
       return;
     }
@@ -2340,10 +2367,31 @@ export class Game {
     this.updateProps(dt);
     this.updateEffects(dt);
     this.updateCamera(dt);
-    this.updateHud(dt);
+    if (!this.hostPresents) this.present(dt);
+    this.input.endFrame();
+  }
+
+  /**
+   * Everything the player reads rather than plays: the HUD, the bars and
+   * numbers over the horde, the objective marker and the minimap.
+   *
+   * All of it is DOM and canvas work whose only consumer is the screen, so it
+   * belongs once per drawn frame rather than once per simulation step - at
+   * 120 Hz that would repaint it two to four times over, and because the tags
+   * measure the window after writing eighty inline styles, each repeat costs a
+   * forced layout. The cost also grew with the number of steps a frame took,
+   * which is the wrong way round: a frame that is already late did the most
+   * redundant work.
+   */
+  present(dt: number): void {
+    // The HUD's own timers (the radio typing itself out, a toast fading) belong
+    // to the run: they hold still while it is paused, but still run down on the
+    // death and victory screens, where the last banner is still on its way out.
+    if (this.state !== 'paused') this.hud.update(dt);
+    if (this.state !== 'playing') return;
+    this.updateHud();
     this.updateWaypoint();
     this.tags.update(dt, this.camera, this.player, this.grid);
-    this.input.endFrame();
   }
 
   private updatePlayer(dt: number): void {
@@ -2386,7 +2434,9 @@ export class Game {
     const target = this.findInteractable();
     if (target) {
       const costText = target.cost > 0 ? ` <b>[${target.cost}]</b>` : '';
-      this.hud.setPrompt(`<b>F</b> ${target.label}${costText}`, target.affordable);
+      this.hud.setPrompt(
+        `<b>${this.input.label('use')}</b> ${target.label}${costText}`, target.affordable,
+      );
       const b = target.repair;
       if (b) {
         if (this.input.isDown('use')) {
@@ -2486,7 +2536,7 @@ export class Game {
         dt, this.grid, this.player.x, this.player.z, this.player.alive, this.torn,
         (enemy, dmg) => {
           // A boss's swing hurts less than a brute's but throws you across the room.
-          this.hurtPlayer(enemy.isBoss ? 45 : dmg);
+          this.hurtPlayer(enemy.isBoss ? 45 : dmg, enemy);
           if (enemy.isBoss) {
             this.knockPlayer(enemy.x, enemy.z, 14);
             audio.slam({ x: enemy.x, z: enemy.z });
@@ -2783,7 +2833,7 @@ export class Game {
     this.lookDY *= 0.82;
   }
 
-  private updateHud(_dt: number): void {
+  private updateHud(): void {
     const p = this.player;
     this.hud.setHealth(p.healthFraction);
     this.hud.setStamina(p.stamina);

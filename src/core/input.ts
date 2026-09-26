@@ -1,34 +1,95 @@
 /**
  * Keyboard + mouse with pointer lock. Keys are tracked by `event.code` so the
- * layout works the same on AZERTY and QWERTY.
+ * layout works the same on AZERTY and QWERTY, and every action but the pause
+ * key can be rebound (see DEFAULT_KEYS and setBindings).
  */
 
 export type Action =
   | 'forward' | 'back' | 'left' | 'right'
   | 'sprint' | 'jump' | 'reload' | 'use' | 'melee' | 'grenade'
-  | 'slot1' | 'slot2' | 'slot3' | 'swap' | 'pause' | 'map' | 'mute';
+  | 'slot1' | 'slot2' | 'swap' | 'pause' | 'map' | 'mute';
 
-const BINDINGS: Record<string, Action> = {
-  KeyW: 'forward', ArrowUp: 'forward',
-  KeyS: 'back', ArrowDown: 'back',
-  KeyA: 'left', ArrowLeft: 'left',
-  KeyD: 'right', ArrowRight: 'right',
-  ShiftLeft: 'sprint', ShiftRight: 'sprint',
-  Space: 'jump',
-  KeyR: 'reload',
-  KeyF: 'use', KeyE: 'use',
-  KeyV: 'melee',
-  KeyG: 'grenade',
-  Digit1: 'slot1', Digit2: 'slot2', Digit3: 'slot3',
-  KeyQ: 'swap',
-  Escape: 'pause',
-  Tab: 'map',
-  KeyM: 'mute',
+/** What each action answers to out of the box. The first key is the one the HUD names. */
+export const DEFAULT_KEYS: Record<Action, string[]> = {
+  forward: ['KeyW', 'ArrowUp'],
+  back: ['KeyS', 'ArrowDown'],
+  left: ['KeyA', 'ArrowLeft'],
+  right: ['KeyD', 'ArrowRight'],
+  sprint: ['ShiftLeft', 'ShiftRight'],
+  jump: ['Space'],
+  reload: ['KeyR'],
+  use: ['KeyF', 'KeyE'],
+  melee: ['KeyV'],
+  grenade: ['KeyG'],
+  slot1: ['Digit1'],
+  slot2: ['Digit2'],
+  swap: ['KeyQ'],
+  map: ['Tab'],
+  mute: ['KeyM'],
+  pause: ['Escape'],
 };
+
+/**
+ * The actions the settings screen offers, in the order it lists them, with the
+ * name it gives each one. `pause` is not among them: Esc is the way out of
+ * every screen in the game, so it stays where it is.
+ */
+export const REBINDABLE: { action: Action; name: string }[] = [
+  { action: 'forward', name: 'MOVE FORWARD' },
+  { action: 'back', name: 'MOVE BACK' },
+  { action: 'left', name: 'STRAFE LEFT' },
+  { action: 'right', name: 'STRAFE RIGHT' },
+  { action: 'sprint', name: 'SPRINT' },
+  { action: 'jump', name: 'JUMP' },
+  { action: 'reload', name: 'RELOAD' },
+  { action: 'use', name: 'BUY / USE / REPAIR' },
+  { action: 'melee', name: 'KNIFE' },
+  { action: 'grenade', name: 'GRENADE' },
+  { action: 'slot1', name: 'WEAPON 1' },
+  { action: 'slot2', name: 'WEAPON 2' },
+  { action: 'swap', name: 'SWAP WEAPON' },
+  { action: 'map', name: 'MAP' },
+  { action: 'mute', name: 'MUTE' },
+];
+
+/** Keys the game will not hand over: the browser or the game needs them. */
+const RESERVED = new Set(['Escape', 'F5', 'F11', 'F12', 'MetaLeft', 'MetaRight']);
+
+/** Whether a key is one the player is allowed to bind. */
+export function bindable(code: string): boolean {
+  return Boolean(code) && !RESERVED.has(code);
+}
+
+/** A key as the settings screen and the HUD write it. */
+export function keyLabel(code: string): string {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return `NUM ${code.slice(6).toUpperCase()}`;
+  if (code.startsWith('Arrow')) return code.slice(5).toUpperCase();
+  const named: Record<string, string> = {
+    Space: 'SPACE', Tab: 'TAB', Escape: 'ESC', Enter: 'ENTER', Backspace: 'BKSP',
+    CapsLock: 'CAPS', ContextMenu: 'MENU', Insert: 'INS', Delete: 'DEL',
+    Home: 'HOME', End: 'END', PageUp: 'PG UP', PageDown: 'PG DN',
+    ShiftLeft: 'L SHIFT', ShiftRight: 'R SHIFT',
+    ControlLeft: 'L CTRL', ControlRight: 'R CTRL',
+    AltLeft: 'L ALT', AltRight: 'R ALT',
+    Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+    Backslash: '\\', Semicolon: ';', Quote: "'", Backquote: '`',
+    Comma: ',', Period: '.', Slash: '/',
+  };
+  return named[code] ?? code.toUpperCase();
+}
+
+/** Key codes the game would rather the browser did not act on itself. */
+const SWALLOW = new Set(['Tab', 'Space', 'Backspace', 'Quote', 'Slash']);
 
 export class Input {
   private readonly down = new Set<Action>();
   private readonly pressed = new Set<Action>();
+  /** Which action each key code fires. Rebuilt whenever the bindings change. */
+  private bindings: Record<string, Action> = {};
+  /** The keys each action answers to, in the order the settings screen shows them. */
+  private keys: Record<Action, string[]> = { ...DEFAULT_KEYS };
   mouseDX = 0;
   mouseDY = 0;
   fire = false;
@@ -45,6 +106,7 @@ export class Input {
   constructor(canvas: HTMLElement, onLockChange: (locked: boolean) => void) {
     this.canvas = canvas;
     this.onLockChange = onLockChange;
+    this.setBindings(DEFAULT_KEYS);
 
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
@@ -58,15 +120,16 @@ export class Input {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    const action = BINDINGS[e.code];
+    const action = this.bindings[e.code];
     if (!action) return;
-    if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
+    // Keys the browser would otherwise act on: Tab moves focus, Space scrolls.
+    if (SWALLOW.has(e.code)) e.preventDefault();
     if (!this.down.has(action)) this.pressed.add(action);
     this.down.add(action);
   };
 
   private handleKeyUp = (e: KeyboardEvent): void => {
-    const action = BINDINGS[e.code];
+    const action = this.bindings[e.code];
     if (action) this.down.delete(action);
   };
 
@@ -109,6 +172,36 @@ export class Input {
     this.fire = false;
     this.aim = false;
   };
+
+  /**
+   * Replaces the key map. Anything left out keeps its default, and a key given
+   * to two actions goes to the last one asking, so a rebind never leaves the
+   * player with a key that does two things at once.
+   */
+  setBindings(keys: Partial<Record<Action, string[]>>): void {
+    const next = { ...DEFAULT_KEYS };
+    for (const [action, codes] of Object.entries(keys) as [Action, string[] | undefined][]) {
+      if (codes?.length) next[action] = codes.filter(bindable);
+    }
+    this.keys = next;
+    const lookup: Record<string, Action> = {};
+    for (const [action, codes] of Object.entries(next) as [Action, string[]][]) {
+      for (const code of codes) lookup[code] = action;
+    }
+    this.bindings = lookup;
+    this.releaseAll();
+  }
+
+  /** The keys an action answers to. */
+  keysFor(action: Action): readonly string[] {
+    return this.keys[action];
+  }
+
+  /** How the HUD names an action: its first key, or nothing if it has none. */
+  label(action: Action): string {
+    const code = this.keys[action][0];
+    return code ? keyLabel(code) : '--';
+  }
 
   requestLock(): void {
     const el = this.canvas as HTMLElement & { requestPointerLock(opts?: object): void };

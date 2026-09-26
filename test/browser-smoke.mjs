@@ -82,6 +82,13 @@ try {
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
   await page.waitForFunction(() => Boolean(window.__RZA), null, { timeout: 20000 });
 
+  // From here the test steps the simulation itself rather than waiting on frames,
+  // so it takes presentation back off the frame loop: every update() repaints the
+  // HUD, and a check can read it straight after the step that changed it.
+  await page.evaluate(() => {
+    window.__RZA.game.hostPresents = false;
+  });
+
   check('page boots without a page error', pageErrors.length === 0, pageErrors[0] ?? '');
   check(
     'main menu is visible',

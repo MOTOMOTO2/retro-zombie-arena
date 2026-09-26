@@ -17,6 +17,7 @@
         <div id="crosshair"><span></span><span></span><span></span><span></span><i></i></div>
         <div id="hitmarker"></div>
         <div id="damage-ring"></div>
+        <div id="damage-dir"><i></i></div>
 
         <div class="hud-corner top-left">
           <div id="points" class="big">500</div>
@@ -92,25 +93,12 @@
           <div id="menu-howto" class="panel hidden">
             <h2>HOW TO PLAY</h2>
             <div class="cols">
-              <ul class="keys">
-                <li><b>WASD</b> move</li>
-                <li><b>MOUSE</b> look</li>
-                <li><b>LMB</b> fire</li>
-                <li><b>RMB</b> aim</li>
-                <li><b>SHIFT</b> sprint</li>
-                <li><b>SPACE</b> jump</li>
-                <li><b>R</b> reload</li>
-                <li><b>F</b> buy / use / repair</li>
-                <li><b>V</b> knife</li>
-                <li><b>G</b> grenade</li>
-                <li><b>1 2 / Q</b> swap weapon</li>
-                <li><b>TAB</b> map</li>
-                <li><b>M</b> mute &nbsp; <b>ESC</b> pause</li>
-              </ul>
+              <!-- Filled in from the live key bindings, so a rebind shows up here. -->
+              <ul class="keys" id="howto-keys"></ul>
               <div class="tips">
                 <p><b>EARN POINTS</b> by hitting and killing the dead. Spend them on
                   doors, wall guns, the mystery box and perk machines.</p>
-                <p><b>HOLD F</b> at a boarded window to nail the planks back on.</p>
+                <p><b>HOLD <span id="howto-use">F</span></b> at a boarded window to nail the planks back on.</p>
                 <p><b>EVERY CHAPTER HAS A WAY OUT.</b> Restore the power, find the three parts, build what Voss asks for at the workbench &mdash; then survive what comes for you, and escape. The yellow-green marker shows where to go next.</p>
                 <p><b>FIND THE GENERATOR.</b> The map is different every night, but the power is always as far from the start as it can be. No power, no perks, no Pack-a-Punch.</p>
                 <p><b>MYSTERY BOX</b> rolls a random gun &mdash; sometimes a legendary. <b>PACK-A-PUNCH</b> takes a gun three tiers deep.</p>
@@ -187,8 +175,17 @@
               <span>DAMAGE NUMBERS</span>
               <input id="opt-numbers" type="checkbox" checked />
             </label>
+            <button id="btn-controls" class="btn">CONTROLS</button>
             <button id="btn-settings-back" class="btn">BACK</button>
             <div class="hint">ESC TO GO BACK</div>
+          </div>
+
+          <div id="menu-controls" class="panel wide hidden">
+            <h2>CONTROLS</h2>
+            <div id="key-rows" class="keybinds"></div>
+            <div class="hint">CLICK A KEY, THEN PRESS THE ONE YOU WANT. MOUSE LOOK, FIRE AND AIM ARE FIXED, AND SO IS ESC.</div>
+            <button id="btn-keys-reset" class="btn">RESET TO DEFAULTS</button>
+            <button id="btn-controls-back" class="btn">BACK</button>
           </div>
         </div>
       </div>

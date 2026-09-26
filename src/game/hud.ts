@@ -53,6 +53,7 @@ export class Hud {
   private readonly bannerEl = el('banner');
   private readonly hitEl = el('hitmarker');
   private readonly ringEl = el('damage-ring');
+  private readonly dirEl = el('damage-dir');
   private readonly lowHealthEl = el('low-health');
   private readonly timersEl = el('powerup-timers');
   private readonly crosshairEl = el('crosshair');
@@ -76,6 +77,7 @@ export class Hud {
   private bannerTimer = 0;
   private hitTimer = 0;
   private ringTimer = 0;
+  private dirTimer = 0;
   private shownPerks = '';
   private shownObjectives = '';
   private radioFull = '';
@@ -204,9 +206,27 @@ export class Hud {
     this.hitTimer = kill ? 0.22 : 0.12;
   }
 
-  damageFlash(): void {
+  /**
+   * Took a hit. `bearing` is where it came from in radians clockwise off the
+   * way the player is facing, and puts a wedge on that side; leave it out for
+   * damage with no direction to point at - your own grenade, burning ground
+   * you are standing in.
+   */
+  damageFlash(bearing: number | null = null): void {
     this.ringEl.style.opacity = '1';
     this.ringTimer = 0.45;
+    if (bearing === null) return;
+    this.dirEl.style.transform = `rotate(${((bearing * 180) / Math.PI).toFixed(1)}deg)`;
+    this.dirEl.style.opacity = '1';
+    this.dirTimer = 1.15;
+  }
+
+  /** Drops the direction wedge at once, for a new run. */
+  clearDamage(): void {
+    this.dirTimer = 0;
+    this.dirEl.style.opacity = '0';
+    this.ringTimer = 0;
+    this.ringEl.style.opacity = '0';
   }
 
   setCrosshair(visible: boolean): void {
@@ -408,6 +428,10 @@ export class Hud {
     if (this.ringTimer > 0) {
       this.ringTimer -= dt;
       if (this.ringTimer <= 0) this.ringEl.style.opacity = '0';
+    }
+    if (this.dirTimer > 0) {
+      this.dirTimer -= dt;
+      if (this.dirTimer <= 0) this.dirEl.style.opacity = '0';
     }
   }
 }

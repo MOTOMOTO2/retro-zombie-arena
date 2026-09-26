@@ -176,7 +176,9 @@ you rather than showing the whole thing.
 - **Points.** 10 per hit, 60 per kill, 100 for a headshot kill, 130 for a knife
   kill, 10 per board you nail back on, plus a survival bonus at the end of each
   round. (That end-of-round bonus is the one thing the source material does not
-  do — it is there to keep the arcade pacing moving.)
+  do — it is there to keep the arcade pacing moving.) A kill is multiplied by
+  what died: everything in the crowd is worth one, and a **tank** is worth four,
+  so 240 for a body shot and 400 for taking its head off.
 - **Doors** cost 750–1500, dearer the deeper they lead. Rooms are joined in at
   least one loop, so there is always somewhere to train a horde; on the open
   maps many rooms share a wide archway instead of a door. Zombies only spawn
@@ -234,7 +236,7 @@ alive the rest of the horde thins out, so the fight is about the boss.
 
 ### What is coming at you
 
-Seven kinds, all built out of the same low-poly body at their own size, tint and
+Eight kinds, all built out of the same low-poly body at their own size, tint and
 stoop, so a crowd reads at a glance. They phase in as the rounds climb, and
 each round mixes them rather than picking one — a chapter's threat brings each
 of them forward by a round and a half.
@@ -248,6 +250,7 @@ of them forward by a round and a half.
 | **Spitter** | 6 | Sickly green, and it will not close. It holds seventeen metres off and lobs bile that leaves a burning patch where it lands. |
 | **Armoured** | 7 | Riot padding and a helmet: body shots do 40%, headshots do the lot. |
 | **Brute** | 8 | Head and shoulders over everything else, more than twice the health, hits for 58. |
+| **Tank** | 10 | Its own body: half again as tall as a shambler and twice as broad, with slab shoulders, a brace round its neck and plated forearms. Five and a half times the health, body shots do 60%, and it hits for 88. The slowest thing on the map — you can walk away from one; the trouble is that by the time it arrives the rest of the horde has you standing still. Bullets that stagger a shambler barely rock it, it shoulders the crowd out of its way rather than being jostled along by it, and it pays four ordinary kills. Never more than about one body in twenty. |
 | **Hellhound** | 5, 10, 15… | Their own round. Fast, low, and they come in packs. |
 
 ### Getting around
@@ -300,7 +303,7 @@ src/
   world/
     maps.ts            the four map profiles: size, openness, kinds of room
     mapdata.ts         the layout generator and the rules every layout must pass
-    grid.ts            circle/tile collision, the obstacle layer, DDA rays, flow field
+    grid.ts            circle/tile collision, obstacles, DDA rays, flow fields
     themes.ts          what each kind of room (and passage) looks like
     lighting.ts        shadowed light bake, moonlight, light probe
     batch.ts           merges static geometry per material and bakes it
@@ -317,7 +320,8 @@ src/
     rules.ts           round curve, scoring, perks, power-ups (pure)
     weapons.ts         weapons, rarities, Pack-a-Punch tiers, ammo mods (pure)
     player.ts          movement, health, wallet, two-slot inventory (pure)
-    enemy.ts           enemy state machine, animation, pooling
+    enemy.ts           enemy state machine, hit shape, animation, pooling
+    horde.ts           the crowd's shared brain: goals, roles, flanking
     boss.ts            boss moves on top of the enemy state machine
     box.ts             the mystery boxes
     elements.ts        lightning bolts, ice and fire effects
@@ -329,7 +333,8 @@ src/
     tags.ts            health bars and damage numbers over the horde
     game.ts            the loop that ties it together
 test/
-  logic.test.ts        69 unit tests over the pure half of the game
+  logic.test.ts        unit tests over the pure half of the game
+  horde.test.ts        pathing round furniture, the roles, tanks, hit boxes
   browser-smoke.mjs    238 checks driving the real game in headless Chromium
 tools/
   mapcheck.mjs         prints a generated layout as ASCII, or sweeps many seeds
@@ -338,7 +343,8 @@ tools/
   story.mjs            screenshots the menus, quest props and every boss
   guns.mjs             contact sheets of every weapon: hip, sights, reload
   deaths.mjs           contact sheet of hit reactions and every kind of death
-  pursuit.mjs          times how fast a scattered horde finds the player
+  lineup.mjs           contact sheet of the kinds side by side, to eyeball a new one
+  pursuit.mjs          times how fast a scattered horde finds the player (--round=N)
   voices.py            bakes voicelines.json into public/voice/ (Chatterbox TTS + Whisper)
   voice-refs/          the two synthetic voices the lines are spoken in
 public/voice/          the recorded lines, one mp3 per take
@@ -394,19 +400,72 @@ filmic curve and the sRGB encode *before* it quantises and dithers, so the
 colour steps land where the eye can see them. Anything brighter than white -
 lamp tubes, zombie eyes, muzzle flashes - blooms.
 
-**Pathing is a flow field, not per-enemy A\*.** A breadth-first search from the
-player's tile is rebuilt about seven times a second over up to ~9000 cells,
-and every zombie reads it. Each one thinks a few times a second: with the player in plain
-sight - checked with a ray down the middle and one along each shoulder, so it
-never tries to squeeze round a corner it cannot fit past - it walks straight at
-them; otherwise it follows the field a few tiles ahead and heads for the
-farthest point it can reach in a straight line, so paths cut corners smoothly.
-A body that stops making progress steps to the best neighbouring tile, and one
-that has been far away, out of sight and getting no closer for six seconds is
-recycled through a window nearer the player, so the horde never loses the
-scent. Out of sight and far away, they also hurry — up to twice their speed
-across the far side of a big map. `tools/pursuit.mjs --map=town` scatters
-zombies over a fully opened map and times how long they take to find you.
+**Pathing is a flow field, not per-enemy A\*.** A flood fill from a goal tile is
+rebuilt about seven times a second over up to ~9000 cells, and every zombie
+reads it. Each one thinks a few times a second: with its target in plain sight -
+checked with a ray down the middle and one along each shoulder, so it never
+tries to squeeze round a corner it cannot fit past - it walks at it; otherwise it
+follows the field a few tiles ahead and heads for the farthest point it can walk
+straight to, so paths cut corners smoothly. One that has been far away, out of
+sight and getting no closer for six seconds is recycled through a window nearer
+the player, so the horde never loses the scent. Out of sight and far away, they
+also hurry — up to twice their speed across the far side of a big map.
+
+**The field knows about the furniture.** It used to be a plain breadth-first
+search over the tiles, which meant a crate or a desk was invisible to it: the
+flow pointed straight through a filing cabinet and left a body grinding along the
+side of it at full speed, waiting for the collision push-out to shuffle it free.
+Now every obstacle feeds a per-tile fill map — how much of each tile the
+furniture takes up, sampled on a 4×4 lattice and padded by half a body — and a
+full tile costs seven times a clear one to walk through. That makes the rebuild a
+small-integer Dijkstra rather than a BFS, which with costs of one, four and seven
+is a dial of eight buckets and barely dearer than the queue it replaced. Nothing
+is ever made *impassable* by furniture, because a mystery box that lands in a
+doorway must never seal a room off; it only ever costs more, so the horde routes
+round the furniture and still gets through if going through is the only way.
+
+A body can still end up flat against a desk that only half fills its tile. When
+one stops making progress it now picks a neighbouring tile it could genuinely set
+off toward — tested against the actual solid boxes, not just the tile map — and
+commits to walking there for a second, scoring the candidates so that carrying on
+round the same side of the thing beats doubling back. It keeps to that side until
+it stops helping and then tries the other, which is what turns a jitter along the
+face of a crate into a walk round the end of one.
+
+**The horde works together, and it gets better at it.** `horde.ts` holds four
+goals and a field for each: the player, a point out to either side of them, and a
+point up the road they are running down, snapped to the nearest tile a body could
+actually stand in. Bodies are dealt a role a couple of times a second — come
+straight in, swing round the left, swing round the right, or get in front and
+stand in the way — and follow that goal's field until they are close enough to
+charge. Never more than half the crowd is off manoeuvring: the other half still
+walking straight at you is what makes being flanked frightening rather than a
+lull, and it is why a lone body never does anything clever at all. The ones already swinging at you are never reassigned; it is the back of
+the crowd, which has room to move, that does the manoeuvring, and anything
+already manoeuvring keeps its job, because re-dealing from scratch twice a second
+leaves a body swinging between two goals and arriving at neither. Bodies that can
+see you walk at where you are *going* rather than where you are, and flankers arc
+round the outside instead of queueing up behind whoever got there first. One sent
+to cut you off will stand in the road for a few seconds and make you come to it.
+
+Two things keep that from becoming a standoff. A manoeuvre that has not reached
+its goal in four seconds is abandoned — without that, the pull of a flank goal and
+the pull of the player balance out and the crowd hovers in a ring just outside
+charging range, which is unnerving and completely harmless. And the few seconds a
+body will spend standing in your way is a budget it cannot refill by being dealt
+the same job again. How much of any of this is switched on depends on the round:
+the first two are the plain straight line the game always had, and it ramps to
+the full thing by about the tenth, sooner in a chapter whose threat is already
+trying to kill you faster. Only the fields somebody is actually following get
+built, and the heavy kinds — tanks, brutes, the armoured, crawlers — never
+manoeuvre at all. They are the anvil, far too slow to get in front of anyone, and
+walking in a straight line all day is what makes them read as heavy.
+
+`tools/pursuit.mjs --map=town` scatters eighteen zombies over a fully opened map
+and times how long they take to find you; `--round=14` does it with the
+coordination at full strength, and prints what they spent their time doing. Both
+have to end with everybody arriving, because a horde that manoeuvres its way into
+never reaching you is worse than a stupid one.
 
 **The story is a small state machine.** `quest.ts` knows only power, three
 parts, built, the boss's state and escaped; every transition returns the story
@@ -425,8 +484,25 @@ spring, snaps the head back on a headshot, staggers it for a moment and shoves
 it back. A kill picks a death - thrown on its back, pitched onto its face,
 buckling at the knees and keeling over, or launched and tumbling by an
 explosion - and a headshot kill takes the head clean off. Bodies stay down for a
-couple of seconds before they sink through the floor. `tools/deaths.mjs`
-renders a contact sheet of all of it.
+couple of seconds before they sink through the floor. How hard a hit rocks a body
+scales down with its size, so the magazine that staggers a shambler barely moves
+a tank. `tools/deaths.mjs` renders a contact sheet of all of it.
+
+**You can shoot a body where you can see it.** A body is a cylinder capped at the
+ankles and the crown of the head, lying along its *spine* rather than standing
+vertically at its feet — which for anything upright is the same thing, and for a
+crawler is the difference between working and not. A crawler is the ordinary body
+pitched over a radian onto its front, and the model pivots at the floor, so the
+head it draws ends up better than a metre in front of the point it stands on.
+Against a vertical cylinder at its feet, shooting the head you could plainly see
+did nothing at all, while shooting the empty floor behind it scored a headshot.
+The draw position now steps back half that reach as well, so a stooped body
+straddles the point it navigates by instead of trailing behind its own head —
+which also means a crawler's swing lands when it looks like it should, rather
+than after it has walked through you. Which end of the body a shot counts as goes
+by where the ray runs closest to the spine, not where it crosses the surface: a
+body lying nearly along the line of fire is entered at the flank and left through
+the head, and what the crosshair was over is the head.
 
 **The guns are modelled, not imported.** `guns.ts` builds each weapon in
 metres from its real-world reference - M1911, Thompson M1928 with the drum, M3
@@ -528,7 +604,7 @@ direction worth pointing at, and get the red vignette on its own.
 
 ```bash
 npm run typecheck     # tsc --noEmit, strict, erasableSyntaxOnly
-npm test              # 69 unit tests (node:test, runs .ts directly)
+npm test              # 96 unit tests (node:test, runs .ts directly)
 npm run map           # prints a random asylum and validates it
 npm run map -- --map=labs --sweep 1000   # generates and validates a thousand seeds
 npm run build         # type-check + bundle
@@ -560,6 +636,39 @@ browser needs; and that saved progress survives being nonsense - a record with
 a string where a round should be, an escape time with no escape behind it, a
 map that no longer exists - rather than putting NaN onto the chapter cards.
 
+`horde.test.ts` covers the parts of the horde that are maths rather than feel.
+For the pathing: that a tile packed with furniture reads as near solid and its
+neighbours do not, that you can see over a crate but not walk through one, that
+the flow field walks a body *round* a crate rather than over the tile it sits on,
+that a crate filling a one-tile corridor makes the way through dearer without
+ever making it impassable, that the field still descends strictly to its goal
+from every tile once costs are involved, that each slot holds its own field
+without disturbing the others, and that a goal asked for inside a wall gets
+nudged out to somewhere a body could actually stand — preferring a clear tile to
+one full of furniture, and giving up rather than inventing floor in the void.
+For the crowd: that coordination is nil for the first two rounds, climbs, tops
+out by the tenth, never dips, and arrives sooner under threat, and that the heavy
+kinds are left out of it. For tanks: that one is bigger, tougher, slower and
+harder-hitting than everything else, that it pays exactly four ordinary kills
+while nothing else got quietly repriced, that it cannot turn up before round ten
+and never makes up more than 6% of a round, and that every kind of enemy has a
+pooled body to be built from.
+
+The hit-box tests pose a body by hand and then work out where three.js will draw
+it, from the same root transform the animation sets — deliberately without going
+near the enemy's own head getters, because the invariant worth testing is that
+what is drawn and what is shot are the same thing. So: that an upright body is
+drawn exactly where it stands and tells a headshot from a chest shot and a miss;
+that a crawler's head agrees with the drawn head at five different facings, sits
+about half a metre off the floor, and is far enough in front of its feet to have
+been outside the old hit box entirely; that a shot at where its head is drawn
+scores a headshot while one at its hips does not; that a shot straight up through
+the air over its feet — which used to be a headshot — now misses; that from the
+side it is only a body wide; and that a tank is taller, broader, heavier, can be
+shot in the head up where a shambler has none, and shoves a shambler aside
+instead of being jostled along by it, while two bodies of a size still share a
+shove down the middle as they always did.
+
 `npm run test:browser` is the one that matters for "does it actually work". It
 builds, serves `dist/`, opens it in headless Chromium with software WebGL, and
 drives the real game object. Two of its sections are there specifically to hold
@@ -571,7 +680,11 @@ cells — with every door open, and fails if a single machine, pad, trap or ques
 prop has been walled in. The second spawns one of each kind and checks that a
 brute is bigger than a shambler, that a crawler's head is near the floor, that
 armour blunts a body shot and not a headshot, that a bloater's death hurts the
-body standing next to it and that a spitter throws instead of closing. It reads the low-resolution framebuffer back and
+body standing next to it and that a spitter throws instead of closing. A third
+section holds the line on the horde actually being relentless: it opens every
+door, scatters twelve zombies across the whole map and fails unless every last
+one of them reaches the player, which is the check that catches an AI clever
+enough to talk itself out of attacking. It reads the low-resolution framebuffer back and
 asserts the world rasterised with a real tonal range; runs 45 seconds of round 1
 and checks that enemies spawn, tear boards off windows, get inside and hurt an
 idle player; buys a door and confirms the tile became walkable; buys a wall gun,
@@ -672,13 +785,17 @@ asked:
   a tile, and each one is pulled in 8% so a body brushes past rather than
   snagging — the arena keeps its clean lines, but the horde no longer strolls
   through a vending machine.
-- **Obstacles do not move the pathfinding.** The flow field is still tile-based
-  and knows nothing about them. They are all far smaller than the rooms they
-  stand in, the push-out slides a body round them, and the enemy's own stuck
-  detection shoulders it sideways; a sub-tile navigation mesh would cost far
-  more than it is worth here. Bullets ignore them too — you can shoot a zombie
-  through a crate, which is the arcade answer and the one the rest of the game
-  already gave.
+- **Obstacles cost the pathfinding, they do not block it.** The flow field is
+  still tile-based — there is no sub-tile navigation mesh, which would cost far
+  more than it is worth here — but each tile now carries how much of it the
+  furniture fills, and a full one costs seven times a clear one to cross. So the
+  horde routes round the furniture rather than into the side of it, and a body
+  that gets wedged anyway follows the thing round. Nothing is ever made
+  impassable by furniture: a mystery box that packs up and lands in a doorway
+  must not seal a room off, so going through stays possible, just expensive.
+  Bullets ignore obstacles entirely — you can shoot a zombie through a crate,
+  which is the arcade answer and the one the rest of the game already gave, and
+  a body can see you over one even where it cannot walk through it.
 - **No objective marker.** The one on the HUD used to name the exact spot and
   the distance to it, which made every map the same map. Finding the room is
   the game now; the props light themselves, and the minimap draws what you have

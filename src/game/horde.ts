@@ -43,9 +43,18 @@ const CUTOFF_AHEAD = 15;
 /** Inside this, a body forgets whatever it was told and comes straight at you. */
 export const COMMIT_RANGE = 9;
 /** Within this of its own goal, a body counts as having arrived. */
-export const GOAL_RANGE = 4.5;
+export const GOAL_RANGE = 5;
 /** Longest one will stand in your way waiting for you to walk into it. */
 export const HOLD_SECONDS = 3;
+/**
+ * Longest a body will spend trying to reach a goal it has not reached yet.
+ *
+ * Without this the pull of a flank goal and the pull of the player balance out
+ * and the crowd hovers in a ring just outside `COMMIT_RANGE`, which is both
+ * unnerving and completely harmless. A manoeuvre that has not worked in a few
+ * seconds is not going to, so the body gives up on it and comes at you.
+ */
+export const MANOEUVRE_SECONDS = 4;
 
 /** Seconds between field rebuilds, and between deals of the roles. */
 const FIELD_INTERVAL = 0.14;
@@ -86,6 +95,8 @@ export class Horde {
   dirZ = 1;
 
   readonly goals: HordeGoal[] = [];
+  /** How many bodies held each role at the last deal. */
+  private readonly holders: number[] = [];
 
   private fieldTimer = 0;
   private roleTimer = 0;
@@ -96,7 +107,10 @@ export class Horde {
   private started = false;
 
   constructor() {
-    for (let s = 0; s < FIELD_SLOTS; s++) this.goals.push({ x: 0, z: 0, live: false });
+    for (let s = 0; s < FIELD_SLOTS; s++) {
+      this.goals.push({ x: 0, z: 0, live: false });
+      this.holders.push(0);
+    }
   }
 
   /** Forget everything: a new map, or a new run. */
@@ -108,6 +122,7 @@ export class Horde {
     this.vx = 0;
     this.vz = 0;
     for (const g of this.goals) g.live = false;
+    this.holders.fill(0);
   }
 
   update(
@@ -155,14 +170,21 @@ export class Horde {
       this.rebuild(grid, torn, ROLE_SLOT.chase, target.x, target.z);
       const slot = this.cursor;
       this.cursor = 1 + (this.cursor % (FIELD_SLOTS - 1));
+      // A field nobody is following is not worth the flood fill: a body newly
+      // dealt that role walks at the player for one tick, by which time the next
+      // deal has been counted and the field is there.
       if (this.cunning <= 0.02) {
         this.goals[slot].live = false;
-      } else if (slot === ROLE_SLOT.left) {
-        this.rebuild(grid, torn, slot, target.x - this.dirZ * FLANK_OUT, target.z + this.dirX * FLANK_OUT);
-      } else if (slot === ROLE_SLOT.right) {
-        this.rebuild(grid, torn, slot, target.x + this.dirZ * FLANK_OUT, target.z - this.dirX * FLANK_OUT);
-      } else {
-        this.rebuild(grid, torn, slot, target.x + this.dirX * CUTOFF_AHEAD, target.z + this.dirZ * CUTOFF_AHEAD);
+      } else if (this.holders[slot] > 0) {
+        const perpX = -this.dirZ;
+        const perpZ = this.dirX;
+        if (slot === ROLE_SLOT.left) {
+          this.rebuild(grid, torn, slot, target.x + perpX * FLANK_OUT, target.z + perpZ * FLANK_OUT);
+        } else if (slot === ROLE_SLOT.right) {
+          this.rebuild(grid, torn, slot, target.x - perpX * FLANK_OUT, target.z - perpZ * FLANK_OUT);
+        } else {
+          this.rebuild(grid, torn, slot, target.x + this.dirX * CUTOFF_AHEAD, target.z + this.dirZ * CUTOFF_AHEAD);
+        }
       }
     }
 
@@ -209,25 +231,52 @@ export class Horde {
       if (e.state !== 'hunt' && e.state !== 'attack') continue;
       crowd.push(e);
     }
+    this.holders.fill(0);
     if (!crowd.length) return;
     crowd.sort((a, b) => this.distTo(a) - this.distTo(b));
 
-    let flanks = Math.round(crowd.length * 0.42 * this.cunning);
-    let cuts = Math.round(crowd.length * 0.26 * this.cunning);
+    // Never more than half the crowd is off manoeuvring. The other half still
+    // walking straight at you is what makes being flanked frightening instead of
+    // a lull, and it is why a lone body never does anything clever at all.
+    const wide = Math.floor(crowd.length * 0.5 * this.cunning);
+    let cuts = Math.round(wide * 0.4);
+    let flanks = wide - cuts;
     let left = 0;
     let right = 0;
 
+    // Anything already manoeuvring keeps its job while the budget lasts.
+    // Re-dealing from scratch twice a second leaves a body swinging between two
+    // goals and arriving at neither.
+    const spare: Enemy[] = [];
     for (const e of crowd) {
-      const d = this.distTo(e) || 1;
-      if (d < COMMIT_RANGE) {
+      if (this.distTo(e) < COMMIT_RANGE) {
         e.setRole('chase');
         continue;
       }
+      if (e.role === 'cutoff' && cuts > 0) {
+        cuts--;
+      } else if (e.role === 'left' && flanks > 0) {
+        flanks--;
+        left++;
+      } else if (e.role === 'right' && flanks > 0) {
+        flanks--;
+        right++;
+      } else {
+        spare.push(e);
+      }
+    }
+
+    for (const e of spare) {
+      // The anvil never manoeuvres, whatever the budget says.
+      if (!manoeuvres(e.kind)) {
+        e.setRole('chase');
+        continue;
+      }
+      const d = this.distTo(e) || 1;
       // How far up the road it already is, and which side of it it is on.
       const ahead = ((e.x - this.px) * this.dirX + (e.z - this.pz) * this.dirZ) / d;
       const across = (e.x - this.px) * -this.dirZ + (e.z - this.pz) * this.dirX;
-      const nimble = manoeuvres(e.kind);
-      if (cuts > 0 && nimble && (ahead > -0.1 || e.kind === 'runner' || e.kind === 'hound')) {
+      if (cuts > 0 && (ahead > -0.1 || e.kind === 'runner' || e.kind === 'hound')) {
         e.setRole('cutoff');
         cuts--;
         continue;
@@ -244,12 +293,13 @@ export class Horde {
         flanks--;
         continue;
       }
-      if (cuts > 0 && nimble) {
+      if (cuts > 0) {
         e.setRole('cutoff');
         cuts--;
         continue;
       }
       e.setRole('chase');
     }
+    for (const e of crowd) this.holders[ROLE_SLOT[e.role]]++;
   }
 }

@@ -48,7 +48,10 @@ import { TILE, tileCenter, worldToTile } from '../world/mapdata.ts';
 import { buildHound, buildZombie, type Outfit, type ZombieModel } from '../gfx/models.ts';
 import { Rng } from '../core/rng.ts';
 import { ENEMY_INFO, enemyDamage, enemySpeed, type EnemyBuild, type EnemyKind } from './rules.ts';
-import { COMMIT_RANGE, GOAL_RANGE, HOLD_SECONDS, ROLE_SLOT, type Horde, type HordeRole } from './horde.ts';
+import {
+  COMMIT_RANGE, GOAL_RANGE, HOLD_SECONDS, MANOEUVRE_SECONDS, ROLE_SLOT,
+  type Horde, type HordeRole,
+} from './horde.ts';
 import type { BarricadeProp } from '../world/props.ts';
 
 export type EnemyState = 'idle' | 'approach' | 'breach' | 'climb' | 'hunt' | 'attack' | 'dead';
@@ -166,6 +169,8 @@ export class Enemy {
   protected blocking = false;
   /** Seconds it has been standing there. It will not wait forever. */
   protected holdTime = 0;
+  /** Seconds it has been working toward its current orders, reached or not. */
+  protected roleTime = 0;
   /** Which way a flanker swings: 1 one side, -1 the other, 0 not a flanker. */
   protected arc = 0;
   /** Whether there is actually room to swing that way. */
@@ -175,6 +180,10 @@ export class Enemy {
   protected leadZ = 0;
   /** Seconds left walking a way round something it got wedged on. */
   protected detour = 0;
+  /** Which way round it is trying to go: it keeps a side until that works. */
+  protected wallSide = 0;
+  /** Path cost when the detour began, to tell afterwards whether it helped. */
+  protected detourDist = -1;
 
   protected phase = 0;
   protected stateTimer = 0;
@@ -268,11 +277,14 @@ export class Enemy {
     this.direct = true;
     this.blocking = false;
     this.holdTime = 0;
+    this.roleTime = 0;
     this.arc = 0;
     this.arcOk = false;
     this.leadX = 0;
     this.leadZ = 0;
     this.detour = 0;
+    this.wallSide = 0;
+    this.detourDist = -1;
     this.lastX = x;
     this.lastZ = z;
     this.stuckTime = 0;
@@ -637,7 +649,8 @@ export class Enemy {
    * a body grinding against the side of it until something else pushed it free.
    */
   protected walkPath(grid: NavGrid, x0: number, z0: number, x1: number, z1: number): boolean {
-    return this.clearPath(grid, x0, z0, x1, z1) && grid.clearWalk(x0, z0, x1, z1);
+    // Furniture first: it is a few array reads against three raycasts.
+    return grid.fillClear(x0, z0, x1, z1) && this.clearPath(grid, x0, z0, x1, z1);
   }
 
   /** Follows one flow field a few tiles ahead and keeps the farthest point it can walk straight to. */
@@ -676,11 +689,16 @@ export class Enemy {
     }
   }
 
-  /** The horde tells a body which of its goals to work toward. */
+  /**
+   * The horde tells a body which of its goals to work toward. Fresh orders get a
+   * fresh clock; the hold budget deliberately does not reset here, so a body
+   * cannot get another few seconds of standing about by being re-dealt the same
+   * job it has already spent its patience on.
+   */
   setRole(role: HordeRole): void {
     if (role === this.role) return;
     this.role = role;
-    this.holdTime = 0;
+    this.roleTime = 0;
   }
 
   /**
@@ -692,16 +710,24 @@ export class Enemy {
     this.direct = true;
     this.blocking = false;
     this.arc = 0;
-    if (!horde || this.role === 'chase') return;
-    const goal = horde.goals[ROLE_SLOT[this.role]];
-    if (!goal.live) return;
-    // Close enough to smell you: the manoeuvre is over, whatever it was.
-    if (dist < COMMIT_RANGE) {
-      this.holdTime = 0;
+    if (!horde || this.role === 'chase') {
+      this.roleTime = 0;
       return;
     }
+    const goal = horde.goals[ROLE_SLOT[this.role]];
+    if (!goal.live) return;
+    // Close enough to smell you: the manoeuvre is over, whatever it was, and
+    // both clocks start again for whenever it is next sent out wide.
+    if (dist < COMMIT_RANGE) {
+      this.holdTime = 0;
+      this.roleTime = 0;
+      return;
+    }
+    this.roleTime += interval;
     const arrived = Math.hypot(goal.x - this.x, goal.z - this.z) < GOAL_RANGE;
     if (!arrived) {
+      // A manoeuvre that has not worked in a few seconds is not going to.
+      if (this.roleTime > MANOEUVRE_SECONDS) return;
       this.slot = ROLE_SLOT[this.role];
       this.direct = false;
     }
@@ -716,14 +742,36 @@ export class Enemy {
   }
 
   /**
-   * Wedged against something. Shoving sideways and hoping only ever worked by
-   * accident; this picks the best neighbouring tile that a body its size could
-   * actually stand in and commits to walking there for a moment, which is what
-   * takes it round the end of a crate rather than along the side of one.
+   * Wedged against something, and going round it.
+   *
+   * The field routes round the furniture, but a body can still end up flat
+   * against the side of a desk that only half fills its tile, driving into it at
+   * full speed with the flow pointing straight through it. So it picks a
+   * neighbouring tile it could genuinely set off toward - tested against the
+   * actual solids, not just the tile map - and commits to walking there for a
+   * moment. Candidates are scored on path cost with a thumb on the scale for
+   * carrying on round the same side and against doubling back, which is what
+   * turns a jitter along the face of a crate into a walk round the end of it. The
+   * side is kept until it stops helping, and then swapped.
    */
   protected unwedge(grid: NavGrid): void {
     this.stuckTime = 0;
+    if (this.wallSide === 0) this.wallSide = Math.random() < 0.5 ? 1 : -1;
     const here = worldToTile(this.x, this.z);
+
+    // The heading it was trying to take, to measure the candidates against.
+    let hx = this.hasWaypoint ? this.wpX - this.x : 0;
+    let hz = this.hasWaypoint ? this.wpZ - this.z : 0;
+    let hd = Math.hypot(hx, hz);
+    if (hd < 1e-3) {
+      hx = Math.sin(this.yaw);
+      hz = Math.cos(this.yaw);
+      hd = 1;
+    }
+    hx /= hd;
+    hz /= hd;
+
+    const step = this.radius + 0.8;
     let best = Number.POSITIVE_INFINITY;
     let found = false;
     for (const [dx, dz] of AROUND) {
@@ -732,9 +780,15 @@ export class Enemy {
       const d = grid.distanceAt(tx, tz, this.slot);
       if (d < 0) continue;
       // A tile packed with furniture is no use: that is what it is stuck on.
-      const fill = grid.fillAt(tx, tz);
-      if (fill >= 2) continue;
-      const score = d + fill * 4;
+      if (grid.fillAt(tx, tz) >= 2) continue;
+      const len = Math.hypot(dx, dz);
+      const ux = dx / len;
+      const uz = dz / len;
+      // Nor is the far side of a desk, to a body pressed against the near side.
+      if (grid.blocked(this.x + ux * step, this.z + uz * step, this.radius * 0.85)) continue;
+      const along = ux * hx + uz * hz;
+      const across = (ux * -hz + uz * hx) * this.wallSide;
+      const score = d - across * 3 - along * 2;
       if (score >= best) continue;
       best = score;
       const c = tileCenter(tx, tz);
@@ -742,22 +796,24 @@ export class Enemy {
       this.wpZ = c.z;
       found = true;
     }
+
     if (!found) {
-      // Properly boxed in: shoulder sideways and try again in a moment.
-      const side = Math.random() < 0.5 ? 1 : -1;
-      this.pushX += Math.cos(this.yaw) * side * 3;
-      this.pushZ += -Math.sin(this.yaw) * side * 3;
+      // Properly boxed in: try the other way round, and shoulder that way.
+      this.wallSide = -this.wallSide;
+      this.pushX += -hz * this.wallSide * 3;
+      this.pushZ += hx * this.wallSide * 3;
       return;
     }
     this.hasWaypoint = true;
     this.direct = false;
     this.detour = DETOUR_SECONDS;
-    // And a nudge to unstick it from whatever it was resting against.
-    const hx = this.wpX - this.x;
-    const hz = this.wpZ - this.z;
-    const hd = Math.hypot(hx, hz) || 1;
-    this.pushX += (hx / hd) * 2.2;
-    this.pushZ += (hz / hd) * 2.2;
+    this.detourDist = grid.distanceAt(here.tx, here.tz, ROLE_SLOT.chase);
+    // And a shove along the way out, to break contact with whatever it is on.
+    const ex = this.wpX - this.x;
+    const ez = this.wpZ - this.z;
+    const ed = Math.hypot(ex, ez) || 1;
+    this.pushX += (ex / ed) * 2.4;
+    this.pushZ += (ez / ed) * 2.4;
   }
 
   /** A few times a second: can it see you, where next, is it stuck, is it lost. */
@@ -773,6 +829,7 @@ export class Enemy {
 
     this.seesPlayer = dist < 48 && this.clearPath(grid, this.x, this.z, px, pz);
     this.chooseGoal(horde, dist, interval);
+    const here = worldToTile(this.x, this.z);
 
     // Where to put its feet: straight at you once it has committed and can see
     // you, otherwise down whichever field its orders point it at.
@@ -780,6 +837,12 @@ export class Enemy {
       this.detour -= interval;
       this.direct = false;
       if (Math.hypot(this.wpX - this.x, this.wpZ - this.z) < 1.4) this.detour = 0;
+      if (this.detour <= 0) {
+        // Did going round that way get it any nearer? If not, try the other.
+        const now = grid.distanceAt(here.tx, here.tz, ROLE_SLOT.chase);
+        if (this.detourDist >= 0 && now >= 0 && now >= this.detourDist) this.wallSide = -this.wallSide;
+        this.detourDist = -1;
+      }
     } else if (this.direct && this.seesPlayer) {
       this.hasWaypoint = false;
     } else {
@@ -790,7 +853,8 @@ export class Enemy {
     // trailing along behind. Only if the ground it would cut across is clear.
     this.leadX = 0;
     this.leadZ = 0;
-    if (horde && this.direct && this.seesPlayer && this.standoff <= 0) {
+    const drift = horde ? Math.hypot(horde.vx, horde.vz) : 0;
+    if (horde && drift > 1 && this.direct && this.seesPlayer && this.standoff <= 0) {
       const ahead = Math.min(LEAD_SECONDS, dist / Math.max(2, this.speed)) * horde.cunning;
       const lx = px + horde.vx * ahead;
       const lz = pz + horde.vz * ahead;
@@ -818,7 +882,6 @@ export class Enemy {
     // Lost means far away, out of sight and getting no closer along the path.
     // A body that is still making its way over keeps going. Always measured on
     // the player's own field, whatever this one is currently following.
-    const here = worldToTile(this.x, this.z);
     const fieldDist = grid.distanceAt(here.tx, here.tz, ROLE_SLOT.chase);
     const closing = fieldDist >= 0 && this.lastFieldDist >= 0 && fieldDist < this.lastFieldDist;
     if (fieldDist >= 0) this.lastFieldDist = fieldDist;
@@ -1380,7 +1443,15 @@ export function rayHitsEnemy(
 
   const enter = Math.max(near, 0);
   if (enter > far || enter > maxDist) return null;
-  // How far up the spine it went in decides whether that was the head.
-  return { dist: enter, head: wu + enter * du >= e.headFrom };
+
+  // Which end of the body was hit goes by where the ray runs closest to the
+  // spine, not by where it crosses the surface. A body lying nearly along the
+  // line of fire is entered at the flank and left through the head; what the
+  // crosshair was over is the head, and that is what the shot should read as.
+  // For anything standing up the two are the same point anyway.
+  let closest = enter;
+  if (a > 1e-9) closest = Math.min(far, Math.max(enter, -b / (2 * a)));
+  const up = Math.min(crown, Math.max(BODY_FOOT, wu + closest * du));
+  return { dist: enter, head: up >= e.headFrom };
 }
 

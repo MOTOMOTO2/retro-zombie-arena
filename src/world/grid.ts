@@ -572,24 +572,32 @@ export class NavGrid {
   }
 
   /**
+   * Whether a straight line from here to there stays out of the furniture. A
+   * handful of array reads, and no raycast - callers that also need line of
+   * sight should ask this first, because it is far the cheaper of the two.
+   */
+  fillClear(x0: number, z0: number, x1: number, z1: number): boolean {
+    if (this.fillDirty) this.refreshFill();
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const d = Math.hypot(dx, dz);
+    const steps = d < 0.01 ? 0 : Math.max(1, Math.ceil(d / (TILE * 0.5)));
+    for (let i = 0; i <= steps; i++) {
+      const t = steps === 0 ? 0 : i / steps;
+      const tx = Math.floor((x0 + dx * t) / TILE);
+      const tz = Math.floor((z0 + dz * t) / TILE);
+      if (!this.inBounds(tx, tz) || this.fill[tz * MAP_W + tx] >= 2) return false;
+    }
+    return true;
+  }
+
+  /**
    * Line of sight that also refuses to cut through furniture. A body uses this
    * to decide whether it can walk straight somewhere; bullets and eyes use
    * plain `lineOfSight`, because you can see and shoot over a crate.
    */
   clearWalk(x0: number, z0: number, x1: number, z1: number): boolean {
-    const dx = x1 - x0;
-    const dz = z1 - z0;
-    const d = Math.hypot(dx, dz);
-    if (d < 0.01) return this.fillAt(Math.floor(x0 / TILE), Math.floor(z0 / TILE)) < 2;
-    if (!this.lineOfSight(x0, z0, x1, z1)) return false;
-    const steps = Math.max(1, Math.ceil(d / (TILE * 0.5)));
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const tx = Math.floor((x0 + dx * t) / TILE);
-      const tz = Math.floor((z0 + dz * t) / TILE);
-      if (this.fillAt(tx, tz) >= 2) return false;
-    }
-    return true;
+    return this.fillClear(x0, z0, x1, z1) && this.lineOfSight(x0, z0, x1, z1);
   }
 
   /** Flood fill of everything reachable on foot from a tile. Used by tests. */

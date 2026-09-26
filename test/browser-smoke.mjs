@@ -458,6 +458,29 @@ try {
     }
     out.spittersThrowFromRange = threw;
     out.spittersKeepTheirDistance = closed > 4;
+
+    // A tank: its own body out of the pool, half again as tall as a shambler,
+    // and it barely notices the shove that staggers one.
+    game.pool.reset();
+    const shambler = put('walker', px + 6, pz, 1000);
+    const tank = put('tank', px + 10, pz, 1000);
+    out.tanksHaveTheirOwnBody = tank.build === 'tank' && shambler.build === 'humanoid';
+    out.tanksAreHuge = tank.spine > shambler.spine * 1.35 && tank.hitRadius > shambler.hitRadius * 1.2;
+    shambler.applyDamage(300, false, false, 1, 0);
+    tank.applyDamage(300, false, false, 1, 0);
+    out.tanksShrugOffShoves = tank.pushX > 0 && tank.pushX < shambler.pushX * 0.8;
+
+    // And it pays four ordinary kills.
+    game.pool.reset();
+    const cheap = put('walker', px + 6, pz, 10);
+    const beforeWalker = game.player.points;
+    game.damageEnemy(cheap, 1e6, false, false, { x: cheap.x, y: 2, z: cheap.z });
+    const forWalker = game.player.points - beforeWalker;
+    const heavy = put('tank', px + 10, pz, 10);
+    const beforeTank = game.player.points;
+    game.damageEnemy(heavy, 1e6, false, false, { x: heavy.x, y: 2, z: heavy.z });
+    out.tanksPayFourKills = forWalker > 0 && game.player.points - beforeTank === forWalker * 4;
+
     game.pool.reset();
     return out;
   });

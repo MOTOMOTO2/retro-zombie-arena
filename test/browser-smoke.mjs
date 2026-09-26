@@ -847,7 +847,7 @@ try {
     // rotation is the bearing the game read off the hit.
     const wedge = () => {
       const deg = /rotate\(([-\d.]+)deg\)/.exec(dir.style.transform);
-      return { deg: deg ? Math.round(Number(deg[1])) : null, shown: dir.style.opacity === '1' };
+      return { deg: deg ? Math.round(Number(deg[1])) : null, shown: dir.classList.contains('on') };
     };
     const from = (dx, dz) => {
       p.health = p.maxHealth;
@@ -865,7 +865,7 @@ try {
     p.yaw = Math.PI / 2;
     out.turned = from(0, -10);
     // Your own grenade, or ground you are standing in, has no bearing to show.
-    dir.style.opacity = '0';
+    dir.classList.remove('on');
     p.health = p.maxHealth;
     game.hurtPlayer(5);
     out.noDirection = wedge();

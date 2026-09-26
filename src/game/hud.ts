@@ -213,20 +213,20 @@ export class Hud {
    * you are standing in.
    */
   damageFlash(bearing: number | null = null): void {
-    this.ringEl.style.opacity = '1';
+    this.ringEl.classList.add('on');
     this.ringTimer = 0.45;
     if (bearing === null) return;
     this.dirEl.style.transform = `rotate(${((bearing * 180) / Math.PI).toFixed(1)}deg)`;
-    this.dirEl.style.opacity = '1';
+    this.dirEl.classList.add('on');
     this.dirTimer = 1.15;
   }
 
-  /** Drops the direction wedge at once, for a new run. */
+  /** Drops both damage marks at once, for a new run. */
   clearDamage(): void {
     this.dirTimer = 0;
-    this.dirEl.style.opacity = '0';
     this.ringTimer = 0;
-    this.ringEl.style.opacity = '0';
+    this.dirEl.classList.remove('on');
+    this.ringEl.classList.remove('on');
   }
 
   setCrosshair(visible: boolean): void {
@@ -427,11 +427,11 @@ export class Hud {
     }
     if (this.ringTimer > 0) {
       this.ringTimer -= dt;
-      if (this.ringTimer <= 0) this.ringEl.style.opacity = '0';
+      if (this.ringTimer <= 0) this.ringEl.classList.remove('on');
     }
     if (this.dirTimer > 0) {
       this.dirTimer -= dt;
-      if (this.dirTimer <= 0) this.dirEl.style.opacity = '0';
+      if (this.dirTimer <= 0) this.dirEl.classList.remove('on');
     }
   }
 }

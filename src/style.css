@@ -201,12 +201,23 @@ html, body {
 #hitmarker.fade { opacity: 0; transition: opacity 0.25s; }
 #hitmarker.kill { filter: drop-shadow(0 0 3px #d22f26); }
 
+/*
+ * Both damage marks snap on and fade out, never the other way round: they are
+ * telling you something you need this instant. The `on` class kills the
+ * transition so the change is immediate, and taking it off lets the base rule
+ * fade the mark away.
+ */
 #damage-ring {
   position: absolute;
   inset: 0;
   opacity: 0;
   background: radial-gradient(ellipse at center, transparent 45%, rgba(170, 10, 10, 0.75) 100%);
-  transition: opacity 0.35s;
+  transition: opacity 0.35s ease-out;
+}
+
+#damage-ring.on {
+  opacity: 1;
+  transition: none;
 }
 
 /*
@@ -224,16 +235,22 @@ html, body {
   width: 0;
   height: 0;
   opacity: 0;
-  transition: opacity 0.3s;
+  transition: opacity 0.3s ease-out;
+}
+
+#damage-dir.on {
+  opacity: 1;
+  transition: none;
 }
 
 #damage-dir i {
   position: absolute;
-  left: -84px;
-  top: -152px;
-  width: 168px;
-  height: 52px;
-  background: radial-gradient(ellipse at 50% 120%, rgba(255, 82, 52, 0.95), rgba(255, 48, 30, 0) 76%);
+  left: -95px;
+  top: -168px;
+  width: 190px;
+  height: 62px;
+  /* A hot core so it still reads through the red the hit puts over everything. */
+  background: radial-gradient(ellipse at 50% 118%, rgba(255, 216, 180, 0.95) 6%, rgba(255, 92, 48, 0.9) 34%, rgba(255, 48, 30, 0) 78%);
   clip-path: polygon(50% 100%, 6% 8%, 94% 8%);
 }
 

@@ -13,6 +13,7 @@
 
       <!-- ================================================= in-game HUD -->
       <div id="hud" class="hidden">
+        <div id="tags"></div>
         <div id="crosshair"><span></span><span></span><span></span><span></span><i></i></div>
         <div id="hitmarker"></div>
         <div id="damage-ring"></div>
@@ -167,12 +168,24 @@
               <input id="opt-vol" type="range" min="0" max="100" value="70" />
             </label>
             <label class="row">
+              <span>MUSIC <b id="val-music">70</b></span>
+              <input id="opt-music" type="range" min="0" max="100" value="70" />
+            </label>
+            <label class="row">
               <span>INVERT Y</span>
               <input id="opt-invert" type="checkbox" />
             </label>
             <label class="row">
               <span>FOV <b id="val-fov">80</b></span>
               <input id="opt-fov" type="range" min="65" max="110" value="80" />
+            </label>
+            <label class="row">
+              <span>ENEMY HEALTH BARS</span>
+              <input id="opt-bars" type="checkbox" checked />
+            </label>
+            <label class="row">
+              <span>DAMAGE NUMBERS</span>
+              <input id="opt-numbers" type="checkbox" checked />
             </label>
             <button id="btn-settings-back" class="btn">BACK</button>
             <div class="hint">ESC TO GO BACK</div>

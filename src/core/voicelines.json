@@ -1,0 +1,38 @@
+{
+  "announcer": {
+    "voice": "announcer",
+    "exaggeration": 0.9,
+    "lines": {
+      "maxammo": ["Max Ammo!"],
+      "instakill": ["Insta Kill!"],
+      "doublepoints": ["Double Points!"],
+      "nuke": ["Kaboom!"],
+      "carpenter": ["Carpenter!"],
+      "hounds": ["Release the hounds!"],
+      "gameover": ["Game over!"]
+    }
+  },
+  "player": {
+    "voice": "player",
+    "exaggeration": 0.75,
+    "lines": {
+      "reload": ["Reloading!", "Changing mags, cover me!", "Hang on, reloading!"],
+      "empty": ["I'm out! I'm out!", "Out of ammo! Come on!", "Empty! I need ammo, now!"],
+      "grenade": ["Here, catch!", "Fire in the hole!", "Grenade! Get down!"],
+      "roundStart": ["Here they come!", "Oh, here we go again!", "More of them! Let's go!", "Alright, lock and load!"],
+      "roundClear": ["Ha! Is that all you've got?", "Phew. Okay. They'll be back.", "Round's done! Catch your breath!"],
+      "hurt": ["Agh! I'm hurt bad!", "I can't take much more of this!", "Get back! Get back!"],
+      "headshot": ["Headshot!", "Right between the eyes!", "Boom! Stay down!", "Next!"],
+      "multikill": ["Ha ha! Scattered them!", "Pieces everywhere!", "Boom! Did you see that?"],
+      "legendary": ["Oh yeah! Now we're talking!", "Now that's a gun!"],
+      "teddy": ["Oh, come on!", "You have got to be kidding me!"],
+      "perk": ["Ahh, that hits the spot!", "Oh yeah! That's the stuff!"],
+      "packed": ["Oh, let's see what this baby can do!", "Oh, she's a beauty now!"],
+      "boss": ["What the hell is that?", "Whoa! That's a big one!"],
+      "bossDown": ["Yeah! Big guy's down!", "Who's next? Come on!"],
+      "objective": ["Yes! That's done!", "Alright! What's next?", "Got it! Keep moving!"],
+      "defend": ["Hold the line!", "Keep them off it!", "Nobody touches it!"],
+      "setback": ["No, no, no!", "Too slow! Again!", "Damn it! Come on!"]
+    }
+  }
+}

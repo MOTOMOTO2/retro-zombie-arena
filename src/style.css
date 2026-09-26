@@ -293,6 +293,9 @@ html, body {
 #objective-list li.done { opacity: 0.4; text-decoration: line-through; }
 #objective-list li.done::before { content: '\2713  '; color: var(--green); }
 #objective-list li.new { animation: objin 0.9s ease-out; }
+#objective-list .prog { color: var(--amber); white-space: pre; }
+#objective-list li.alert .prog { color: var(--blood); animation: objalert 0.5s steps(2) infinite; }
+@keyframes objalert { 50% { opacity: 0.35; } }
 @keyframes objin { from { color: var(--amber); transform: translateX(-12px); } }
 
 /* Voss on the radio: a subtitle box that types itself out. */
@@ -347,6 +350,51 @@ html, body {
   transition: width 0.15s linear;
 }
 #boss-bar.enraged #boss-fill { animation: blink 0.4s steps(2) infinite; }
+
+/* Health bars over hurt enemies and the damage numbers that pop off them. */
+#tags {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.ztag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 46px;
+  height: 7px;
+  display: none;
+  background: rgba(10, 10, 12, 0.75);
+  border: 1px solid #000;
+  box-shadow: 0 0 0 1px rgba(232, 226, 206, 0.22);
+  will-change: transform, opacity;
+}
+.ztag i {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 50%;
+}
+.ztag .chip { background: #f4e6b0; }
+.dmg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  color: var(--bone);
+  font: bold 15px/1 var(--font);
+  white-space: nowrap;
+  text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000;
+  will-change: transform, opacity;
+}
+.dmg.head { color: var(--amber); font-size: 19px; }
+.dmg.burn { color: #ff8a3a; font-size: 12px; }
+.dmg.kill { color: #ff6a4a; font-size: 18px; }
+.dmg.head.kill {
+  color: var(--amber);
+  font-size: 22px;
+  text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000, 0 0 6px var(--blood);
+}
 
 /* The objective marker: a diamond over the target, pinned to the edge when off screen. */
 #waypoint {
@@ -581,6 +629,22 @@ html, body {
 .card .ttl { font-size: 11px; letter-spacing: 0.25em; opacity: 0.75; }
 .card .blurb { font-size: 11.5px; line-height: 1.45; opacity: 0.8; flex: 1; }
 .card .status { font-size: 10.5px; letter-spacing: 0.12em; color: var(--green); }
+.threat { font-size: 10.5px; letter-spacing: 0.14em; color: var(--bone); white-space: nowrap; }
+.threat i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 2px;
+  border: 1px solid currentColor;
+  vertical-align: -1px;
+  opacity: 0.45;
+}
+.threat i.on { background: currentColor; opacity: 1; }
+.threat.t0 { color: var(--green); }
+.threat.t1 { color: var(--amber); }
+.threat.t2 { color: #ff8a3a; }
+.threat.t3 { color: var(--blood); }
+.card .threat { font-size: 10px; letter-spacing: 0.04em; }
 .card.locked { cursor: not-allowed; filter: grayscale(1); opacity: 0.55; }
 .card.locked:hover { transform: none; box-shadow: none; border-color: rgba(232, 226, 206, 0.25); }
 .card.locked .status { color: var(--blood); }

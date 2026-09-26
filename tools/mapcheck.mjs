@@ -52,6 +52,7 @@ L.boxPads.forEach((b, i) => mark(b.tx, b.tz, i === 0 ? '?' : 'b'));
 mark(L.powerSwitch.tx, L.powerSwitch.tz, 'S');
 mark(L.pack.tx, L.pack.tz, 'K');
 L.parts.forEach((p) => mark(p.tx, p.tz, '*'));
+L.spots.forEach((p) => mark(p.tx, p.tz, 'v'));
 mark(L.workbench.tx, L.workbench.tz, 'X');
 mark(L.exit.tx, L.exit.tz, 'E');
 mark(L.spawn.tx, L.spawn.tz, '@');

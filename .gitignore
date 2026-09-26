@@ -5,3 +5,5 @@ dist
 .DS_Store
 tools/shots/
 test/screenshot.png
+tools/.kokoro/
+tools/.voicegen/

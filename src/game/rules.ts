@@ -4,6 +4,10 @@
  * The round curve deliberately follows the classic wave-survival shape: flat-ish
  * health for the first nine rounds, then a compounding ramp that eventually
  * outruns any weapon. All of it is pure maths so the balance is unit tested.
+ *
+ * On top of the round sits the chapter's threat: 0 in the asylum, 3 in
+ * Sublevel 9. Each step makes the horde tougher, quicker, harder-hitting and
+ * more numerous, and brings the runners and brutes in earlier.
  */
 
 export type EnemyKind = 'walker' | 'runner' | 'brute' | 'hound';
@@ -28,31 +32,40 @@ export function isHoundRound(round: number): boolean {
   return round >= HOUND_EVERY && round % HOUND_EVERY === 0;
 }
 
-/** Enemy hit points for a round. 150 at round 1, 950 at round 9, then +10%/round. */
-export function enemyHealth(round: number): number {
-  if (round <= 9) return 50 + round * 100;
-  return Math.round(950 * Math.pow(1.1, round - 9));
+/** The hardest chapter's threat. */
+export const MAX_THREAT = 3;
+
+/**
+ * Enemy hit points for a round. 150 at round 1, 950 at round 9, then +10%/round,
+ * and a fifth more for each step of threat.
+ */
+export function enemyHealth(round: number, threat = 0): number {
+  const base = round <= 9 ? 50 + round * 100 : 950 * Math.pow(1.1, round - 9);
+  return Math.round(base * (1 + 0.2 * threat));
 }
 
 /** Hound rounds are short and sharp. */
-export function houndHealth(round: number): number {
-  return Math.round(enemyHealth(round) * 0.55);
+export function houndHealth(round: number, threat = 0): number {
+  return Math.round(enemyHealth(round, threat) * 0.55);
 }
 
-export function enemyCount(round: number): number {
-  if (isHoundRound(round)) return Math.min(30, 6 + Math.floor(round * 0.9));
+export function enemyCount(round: number, threat = 0): number {
+  const more = 1 + 0.12 * threat;
+  if (isHoundRound(round)) return Math.min(30 + threat * 2, Math.round((6 + Math.floor(round * 0.9)) * more));
   const extra = round > 9 ? Math.pow(round - 9, 1.55) : 0;
-  return Math.min(74, Math.round(6 + (round - 1) * 4 + extra));
+  return Math.min(74 + threat * 5, Math.round((6 + (round - 1) * 4 + extra) * more));
 }
 
-export function maxAlive(round: number): number {
-  if (isHoundRound(round)) return Math.min(10, 4 + Math.floor(round / 4));
-  return Math.min(26, 8 + Math.floor(round * 1.4));
+export function maxAlive(round: number, threat = 0): number {
+  if (isHoundRound(round)) return Math.min(10 + threat, 4 + Math.floor(round / 4) + threat);
+  // The pool holds forty bodies, and the dead linger a moment: never more than 28 up at once.
+  return Math.min(26 + Math.min(2, threat), 8 + Math.floor(round * 1.4) + threat * 2);
 }
 
-export function spawnInterval(round: number): number {
-  if (isHoundRound(round)) return Math.max(0.55, 2.4 - round * 0.09);
-  return Math.max(0.22, 2.1 - round * 0.105);
+export function spawnInterval(round: number, threat = 0): number {
+  const quicker = 1 - 0.07 * threat;
+  if (isHoundRound(round)) return Math.max(0.5, (2.4 - round * 0.09) * quicker);
+  return Math.max(0.2, (2.1 - round * 0.105) * quicker);
 }
 
 /**
@@ -60,38 +73,35 @@ export function spawnInterval(round: number): number {
  * round-one walker covers about 1.6 m/s - a purposeful shamble, not a stroll -
  * and by the late rounds most of them are jogging.
  */
-export function enemySpeed(round: number, kind: EnemyKind): number {
+export function enemySpeed(round: number, kind: EnemyKind, threat = 0): number {
   const ramp = Math.min(3.6, round * 0.17);
+  const quicker = 1 + 0.05 * threat;
   switch (kind) {
     case 'walker':
-      return 3.2 + ramp * 0.8;
+      return (3.2 + ramp * 0.8) * quicker;
     case 'runner':
-      return 5.4 + ramp * 0.75;
+      return (5.4 + ramp * 0.75) * quicker;
     case 'brute':
-      return 2.8 + ramp * 0.5;
+      return (2.8 + ramp * 0.5) * quicker;
     case 'hound':
-      return 7.4 + Math.min(1.6, round * 0.05);
+      return (7.4 + Math.min(1.6, round * 0.05)) * quicker;
   }
 }
 
-export function enemyDamage(kind: EnemyKind): number {
-  switch (kind) {
-    case 'walker':
-      return 32;
-    case 'runner':
-      return 34;
-    case 'brute':
-      return 58;
-    case 'hound':
-      return 28;
-  }
+export function enemyDamage(kind: EnemyKind, threat = 0): number {
+  const base = { walker: 32, runner: 34, brute: 58, hound: 28 }[kind];
+  return Math.round(base * (1 + 0.1 * threat));
 }
 
-/** Composition of a normal round: runners and brutes phase in as it gets late. */
-export function roundMix(round: number): { kind: EnemyKind; weight: number }[] {
+/**
+ * Composition of a normal round: runners and brutes phase in as it gets late,
+ * and a round and a half earlier for each step of threat.
+ */
+export function roundMix(round: number, threat = 0): { kind: EnemyKind; weight: number }[] {
   if (isHoundRound(round)) return [{ kind: 'hound', weight: 1 }];
-  const runner = round < 4 ? 0 : Math.min(0.65, (round - 3) * 0.075);
-  const brute = round < 8 ? 0 : Math.min(0.22, (round - 7) * 0.025);
+  const r = round + threat * 1.5;
+  const runner = r < 4 ? 0 : Math.min(0.65, (r - 3) * 0.075);
+  const brute = r < 8 ? 0 : Math.min(0.22, (r - 7) * 0.025);
   const walker = Math.max(0.1, 1 - runner - brute);
   return [
     { kind: 'walker', weight: walker },
@@ -100,15 +110,15 @@ export function roundMix(round: number): { kind: EnemyKind; weight: number }[] {
   ];
 }
 
-export function planRound(round: number): SpawnPlan {
+export function planRound(round: number, threat = 0): SpawnPlan {
   const hounds = isHoundRound(round);
   return {
     round,
-    total: enemyCount(round),
-    maxAlive: maxAlive(round),
-    interval: spawnInterval(round),
-    health: hounds ? houndHealth(round) : enemyHealth(round),
-    mix: roundMix(round),
+    total: enemyCount(round, threat),
+    maxAlive: maxAlive(round, threat),
+    interval: spawnInterval(round, threat),
+    health: hounds ? houndHealth(round, threat) : enemyHealth(round, threat),
+    mix: roundMix(round, threat),
     isHoundRound: hounds,
   };
 }

@@ -1,7 +1,9 @@
 /**
- * The props the story hangs on: the three parts waiting on crates around the
- * map, the workbench they are built into, and the way out of the start room
- * that stays sealed until the boss is dead.
+ * The props the story hangs on: the parts waiting on crates around the map,
+ * the valves some chapters have you open, the station (a workbench that
+ * holds whatever the chapter builds, feeds or defends) with the ring you
+ * hold it from, and the way out of the start room that stays sealed until
+ * the boss is dead.
  */
 
 import * as THREE from 'three';
@@ -160,6 +162,94 @@ export class PartProp {
   }
 }
 
+/* ----------------------------------------------------------------- valves */
+
+const VALVE_GLOW = new THREE.Color(2.4, 1.5, 0.35);
+
+/**
+ * A big handwheel valve on a steam main: a pipe up the wall, a flange, the
+ * wheel and a lamp that goes from red to green once it is open. While the
+ * valves are the job, a shaft of amber light marks each shut one.
+ */
+export class ValveProp {
+  readonly group = new THREE.Group();
+  readonly center: THREE.Vector3;
+  readonly index: number;
+  private readonly wheel = new THREE.Group();
+  private readonly lampMat: THREE.MeshBasicMaterial;
+  private readonly beam: THREE.Mesh;
+  private readonly beamMat: THREE.MeshBasicMaterial;
+  private turn = 0;
+  open = false;
+
+  constructor(p: WallProp, index: number, probe: LightProbe) {
+    this.index = index;
+    const pos = againstWall(p, 0.3);
+    this.center = new THREE.Vector3(pos.x, 2.6, pos.z);
+    this.group.position.copy(pos);
+    this.group.rotation.y = p.facing;
+
+    const iron = new THREE.MeshLambertMaterial({ map: textures().metalDark });
+    const rust = new THREE.MeshLambertMaterial({ color: 0x6a4a32 });
+    // The main, running up the wall and off along it.
+    mesh(new THREE.CylinderGeometry(0.3, 0.3, WALL_H, 8), iron, 0, WALL_H / 2, -0.05, this.group);
+    const along = mesh(new THREE.CylinderGeometry(0.22, 0.22, 3.2, 8), iron, 0, WALL_H - 1.2, -0.05, this.group);
+    along.rotation.z = Math.PI / 2;
+    // The valve body sticking out of it, with flanges.
+    const body = mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.8, 8), rust, 0, 2.6, 0.35, this.group);
+    body.rotation.x = Math.PI / 2;
+    for (const z of [0.05, 0.7]) {
+      const flange = mesh(new THREE.CylinderGeometry(0.46, 0.46, 0.1, 8), iron, 0, 2.6, z, this.group);
+      flange.rotation.x = Math.PI / 2;
+    }
+    const stem = mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.5, 6), iron, 0, 2.6, 0.95, this.group);
+    stem.rotation.x = Math.PI / 2;
+    // The handwheel: a rim and four spokes, painted red like they always are.
+    const red = flatMaterial(0xa82a1c);
+    mesh(new THREE.TorusGeometry(0.62, 0.07, 6, 16), red, 0, 0, 0, this.wheel);
+    for (let i = 0; i < 4; i++) {
+      const spoke = mesh(new THREE.BoxGeometry(1.24, 0.08, 0.08), red, 0, 0, 0, this.wheel);
+      spoke.rotation.z = (i * Math.PI) / 4;
+    }
+    this.wheel.position.set(0, 2.6, 1.18);
+    this.group.add(this.wheel);
+    // A pressure gauge and the lamp over it.
+    const gauge = mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.08, 10), flatMaterial(0xd8d2c0), 0.7, 3.3, 0.18, this.group);
+    gauge.rotation.x = Math.PI / 2;
+    this.lampMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 0.25, 0.15) });
+    mesh(new THREE.BoxGeometry(0.34, 0.34, 0.24), this.lampMat, 0, 3.7, 0.2, this.group);
+
+    this.beamMat = new THREE.MeshBasicMaterial({
+      color: VALVE_GLOW, map: beamFade(), transparent: true, opacity: 0.2, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.beam = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.8, WALL_H - 1.2, 8, 1, true), this.beamMat);
+    this.beam.position.set(0, 1.2 + (WALL_H - 1.2) / 2, 1.2);
+    this.beam.visible = false;
+    this.group.add(this.beam);
+    tint(this.group, probe, pos.x, pos.z);
+  }
+
+  /** Open or shut, and whether it is the job right now (which lights the shaft over a shut one). */
+  set(open: boolean, wanted: boolean): void {
+    this.open = open;
+    this.lampMat.color.setRGB(open ? 0.3 : 2.4, open ? 2.6 : 0.25, open ? 0.5 : 0.15);
+    this.beam.visible = wanted && !open;
+  }
+
+  animate(t: number, dt: number): void {
+    // The wheel spins round two and a half turns to open, and back when it slams shut.
+    const target = this.open ? -Math.PI * 5 : 0;
+    this.turn += (target - this.turn) * Math.min(1, dt * (this.open ? 3 : 6));
+    this.wheel.rotation.z = this.turn;
+    if (this.beam.visible) this.beamMat.opacity = 0.14 + 0.06 * Math.sin(t * 3 + this.index);
+  }
+
+  dispose(): void {
+    disposeAll(this.group);
+  }
+}
+
 /* -------------------------------------------------------------- workbench */
 
 export class WorkbenchProp {
@@ -170,9 +260,11 @@ export class WorkbenchProp {
   private readonly lampMat: THREE.MeshBasicMaterial;
   private readonly device = new THREE.Group();
   private readonly deviceGlow: THREE.MeshBasicMaterial;
+  private charge = 0;
   private built = false;
 
-  constructor(p: WallProp, probe: LightProbe) {
+  /** `slots` is how many parts the chapter brings to the bench. */
+  constructor(p: WallProp, probe: LightProbe, slots: number) {
     const pos = againstWall(p, 1.3);
     this.center = new THREE.Vector3(pos.x, 1.8, pos.z);
     this.group.position.copy(pos);
@@ -194,10 +286,10 @@ export class WorkbenchProp {
     // Vice.
     mesh(new THREE.BoxGeometry(0.5, 0.4, 0.6), flatMaterial(0x3a4a6a), 1.5, 2.0, 0.4, this.group);
 
-    // Three spots on the bench for the parts; outlines until they turn up.
-    for (let i = 0; i < 3; i++) {
+    // A spot on the bench for each part; outlines until they turn up.
+    for (let i = 0; i < slots; i++) {
       const slot = new THREE.Group();
-      slot.position.set(-1.1 + i * 1.1, 2.1, 0.2);
+      slot.position.set((i - (slots - 1) / 2) * 1.1, 2.1, 0.2);
       this.group.add(slot);
       this.slots.push(slot);
       const ghost = new THREE.Mesh(
@@ -245,6 +337,11 @@ export class WorkbenchProp {
     this.lampMat.color.set(ready ? 0x55ff88 : 0x551111).multiplyScalar(ready ? 3 : 1);
   }
 
+  /** How far along the device's job is, 0..1: it glows harder the closer it gets. */
+  setCharge(charge: number): void {
+    this.charge = charge;
+  }
+
   setBuilt(built: boolean): void {
     this.built = built;
     this.device.visible = built;
@@ -256,7 +353,8 @@ export class WorkbenchProp {
   animate(t: number): void {
     for (const s of this.slots) for (const c of s.children) c.rotation.y = t * 0.8;
     if (this.built) {
-      const k = 0.6 + 0.4 * Math.abs(Math.sin(t * 4));
+      // It glows harder, and throbs faster, the closer its job is to done.
+      const k = (0.6 + 0.4 * Math.abs(Math.sin(t * (4 + this.charge * 6)))) * (1 + this.charge * 1.5);
       this.deviceGlow.color.setRGB(3 * k, 0.8 * k, 0.4 * k);
     }
   }
@@ -266,6 +364,56 @@ export class WorkbenchProp {
       s.remove(c);
       disposeAll(c);
     }
+    disposeAll(this.group);
+  }
+}
+
+/* ------------------------------------------------------------------- ring */
+
+/**
+ * The circle on the floor you have to stay inside while the station is fed or
+ * defended. It is built in world space out of short arcs, and any arc the
+ * station cannot see is left out, so it never glows through a wall onto the
+ * floor of the next room.
+ */
+export class StationRing {
+  readonly group = new THREE.Group();
+  private readonly mat: THREE.MeshBasicMaterial;
+
+  constructor(center: THREE.Vector3, radius: number, seen: (x0: number, z0: number, x1: number, z1: number) => boolean) {
+    const segs = 72;
+    const inner = radius - 0.8;
+    const pos: number[] = [];
+    const at = (a: number, r: number): number[] => [center.x + Math.cos(a) * r, 0.06, center.z + Math.sin(a) * r];
+    for (let i = 0; i < segs; i++) {
+      const a0 = (i / segs) * Math.PI * 2;
+      const a1 = ((i + 1) / segs) * Math.PI * 2;
+      const am = (a0 + a1) / 2;
+      if (!seen(center.x, center.z, center.x + Math.cos(am) * radius, center.z + Math.sin(am) * radius)) continue;
+      pos.push(...at(a0, inner), ...at(a1, inner), ...at(a1, radius), ...at(a0, inner), ...at(a1, radius), ...at(a0, radius));
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    this.mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(2.2, 1.4, 0.3), transparent: true, opacity: 0.8, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.group.add(new THREE.Mesh(geo, this.mat));
+    this.group.visible = false;
+  }
+
+  /** Amber while it is defended, red while it is fed, hidden otherwise. */
+  set(kind: 'defend' | 'harvest' | null): void {
+    this.group.visible = kind !== null;
+    if (kind === 'defend') this.mat.color.setRGB(2.2, 1.4, 0.3);
+    if (kind === 'harvest') this.mat.color.setRGB(2.6, 0.35, 0.2);
+  }
+
+  animate(t: number): void {
+    if (this.group.visible) this.mat.opacity = 0.75 + 0.25 * Math.sin(t * 5);
+  }
+
+  dispose(): void {
     disposeAll(this.group);
   }
 }
@@ -366,24 +514,45 @@ export class ExitProp {
 
 export type QuestProps = {
   parts: PartProp[];
+  valves: ValveProp[];
   bench: WorkbenchProp;
+  ring: StationRing;
   exit: ExitProp;
 };
 
-export function buildQuestProps(parts: WallProp[], bench: WallProp, exit: WallProp, probe: LightProbe): QuestProps {
+/**
+ * What a chapter needs out in the map: how many parts, how many valves, and
+ * the radius of the ring round the station, with a test of whether the
+ * station can see a point (so the ring stays in its own room).
+ */
+export type QuestNeeds = {
+  parts: number;
+  valves: number;
+  radius: number;
+  seen: (x0: number, z0: number, x1: number, z1: number) => boolean;
+};
+
+export function buildQuestProps(
+  parts: WallProp[], spots: WallProp[], bench: WallProp, exit: WallProp, needs: QuestNeeds, probe: LightProbe,
+): QuestProps {
+  const station = new WorkbenchProp(bench, probe, needs.parts);
   return {
-    parts: parts.map((p, i) => new PartProp(p, i, probe)),
-    bench: new WorkbenchProp(bench, probe),
+    parts: parts.slice(0, needs.parts).map((p, i) => new PartProp(p, i, probe)),
+    valves: spots.slice(0, needs.valves).map((p, i) => new ValveProp(p, i, probe)),
+    bench: station,
+    ring: new StationRing(station.center, needs.radius, needs.seen),
     exit: new ExitProp(exit, probe),
   };
 }
 
 export function questGroups(q: QuestProps): THREE.Object3D[] {
-  return [...q.parts.map((p) => p.group), q.bench.group, q.exit.group];
+  return [...q.parts.map((p) => p.group), ...q.valves.map((v) => v.group), q.bench.group, q.ring.group, q.exit.group];
 }
 
 export function disposeQuestProps(q: QuestProps): void {
   for (const p of q.parts) p.dispose();
+  for (const v of q.valves) v.dispose();
   q.bench.dispose();
+  q.ring.dispose();
   q.exit.dispose();
 }

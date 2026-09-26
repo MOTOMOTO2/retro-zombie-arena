@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const ROOT = fileURLToPath(new URL('../dist', import.meta.url));
+const VOICE_LINES = JSON.parse(await readFile(new URL('../src/core/voicelines.json', import.meta.url), 'utf8'));
+const VOICE_TAKES = Object.values(VOICE_LINES).reduce((n, s) => n + Object.values(s.lines).flat().length, 0);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -22,6 +24,7 @@ const MIME = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.mp3': 'audio/mpeg',
   '.ico': 'image/x-icon',
 };
 
@@ -606,6 +609,227 @@ try {
   check('zombies have voices', voices.active === 5, `${voices.active} sounding, context ${voices.state}`);
   check('a horde cannot drown the mix', voices.capped <= 7, `${voices.capped} voices after a flood`);
 
+  // ------------------------------------------- which ear, grunts, announcer
+  const ears = await page.evaluate(async () => {
+    const { audio, game } = window.__RZA;
+    const prev = game.state;
+    game.state = 'paused'; // so the live game cannot move the ears or make noise
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(2600); // let the flood of moans die away
+
+    const ctx = audio.ctx;
+    const split = ctx.createChannelSplitter(2);
+    audio.sfxBus.connect(split);
+    const taps = [0, 1].map((ch) => {
+      const a = ctx.createAnalyser();
+      a.fftSize = 1024;
+      split.connect(a, ch);
+      return a;
+    });
+    const buf = new Float32Array(1024);
+    const listen = async (ms) => {
+      const e = [0, 0];
+      const t0 = performance.now();
+      while (performance.now() - t0 < ms) {
+        taps.forEach((a, i) => {
+          a.getFloatTimeDomainData(buf);
+          for (const x of buf) e[i] += x * x;
+        });
+        await wait(10);
+      }
+      return e;
+    };
+
+    audio.setListener({ x: 0, z: 0 }, 0);
+    audio.zap({ x: 8, z: 0 });
+    const right = await listen(300);
+    audio.zap({ x: -8, z: 0 });
+    const left = await listen(300);
+    // A moan that starts on the right must end up on the left once you turn round.
+    audio.zombieVoice({ x: 8, z: 0 }, 'moan', 1);
+    const before = await listen(300);
+    audio.setListener({ x: 0, z: 0 }, Math.PI);
+    const after = await listen(300);
+    await wait(2400);
+    audio.setListener({ x: 0, z: 0 }, 0);
+    audio.hurt(34, 0.6);
+    const grunt = await listen(400);
+
+    // The announcer: a recorded line, through the mix, dead centre.
+    const loaded = await audio.voicesReady;
+    await wait(600);
+    game.applyPowerUp('doublepoints');
+    const called = audio.lastLine;
+    const announcer = await listen(900);
+    // Nobody talks over him.
+    const overAnnouncer = audio.callout('boss');
+    await wait(900);
+    // The player: one line at a time, with room between them, unless it matters.
+    const first = audio.callout('perk');
+    const crowded = audio.callout('perk');
+    const urgent = audio.callout('boss');
+    const player = await listen(600);
+
+    split.disconnect();
+    audio.sfxBus.disconnect(split);
+    game.state = prev;
+    return { right, left, before, after, grunt, loaded, called, announcer, overAnnouncer, first, crowded, urgent, player, last: audio.lastLine };
+  });
+  const side = ([l, r]) => (r - l) / Math.max(1e-9, r + l);
+  check('a sound on the right is heard on the right', side(ears.right) > 0.25, `balance ${side(ears.right).toFixed(2)}`);
+  check('a sound on the left is heard on the left', side(ears.left) < -0.25, `balance ${side(ears.left).toFixed(2)}`);
+  check('a sound on the right is not cut from the left ear', ears.right[0] > ears.right[1] * 0.05, `L/R ${(ears.right[0] / ears.right[1]).toFixed(2)}`);
+  check(
+    'turning round re-pans a sound already playing',
+    side(ears.before) > 0.2 && side(ears.after) < -0.15,
+    `balance ${side(ears.before).toFixed(2)} then ${side(ears.after).toFixed(2)}`,
+  );
+  check('the player grunts, dead centre, when hit', ears.grunt[0] > 0.5 && Math.abs(side(ears.grunt)) < 0.1, `energy ${ears.grunt[0].toFixed(1)}, balance ${side(ears.grunt).toFixed(2)}`);
+  check('every recorded voice line loads', ears.loaded === VOICE_TAKES, `${ears.loaded}/${VOICE_TAKES} takes`);
+  check(
+    'the announcer calls out power-ups in a recorded voice',
+    ears.called === 'announcer.doublepoints' && ears.announcer[0] > 1 && Math.abs(side(ears.announcer)) < 0.1,
+    `${ears.called}, energy ${ears.announcer[0].toFixed(1)}, balance ${side(ears.announcer).toFixed(2)}`,
+  );
+  check('the player does not talk over the announcer', ears.overAnnouncer === false);
+  check(
+    'the player talks one line at a time, urgent lines cutting in',
+    ears.first === true && ears.crowded === false && ears.urgent === true && ears.last === 'player.boss' && ears.player[0] > 0.5,
+    `first ${ears.first}, crowded ${ears.crowded}, urgent ${ears.urgent}, energy ${ears.player[0].toFixed(1)}`,
+  );
+
+  // ---------------------------------------------------------- arcade music
+  const music = await page.evaluate(async () => {
+    const { audio, game } = window.__RZA;
+    const prev = game.state;
+    game.state = 'paused'; // the test drives the music itself
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const ctx = audio.ctx;
+    const tap = ctx.createAnalyser();
+    tap.fftSize = 1024;
+    audio.musicBus.connect(tap);
+    audio.stopMusic();
+    await wait(300);
+    audio.startMusic();
+    let intensity = 0.3;
+    const pump = setInterval(() => audio.updateMusic(1 / 60, intensity), 16);
+    await wait(400);
+    const calm = audio.musicPosition?.section;
+    audio.musicCue('fight');
+    await wait(2600);
+    const fight = { ...audio.musicPosition };
+
+    // Loudness every 20 ms: a tune with a beat keeps jumping; a drone does not.
+    const buf = new Float32Array(1024);
+    const env = [];
+    let peak = 0;
+    const t0 = performance.now();
+    while (performance.now() - t0 < 2500) {
+      tap.getFloatTimeDomainData(buf);
+      let e = 0;
+      for (const x of buf) {
+        e += x * x;
+        peak = Math.max(peak, Math.abs(x));
+      }
+      env.push(Math.sqrt(e / buf.length));
+      await wait(20);
+    }
+    const mean = env.reduce((a, b) => a + b, 0) / env.length;
+    let onsets = 0;
+    for (let i = 1, quiet = 0; i < env.length; i++, quiet++) {
+      if (quiet >= 3 && env[i] > env[i - 1] * 1.3 && env[i] > mean * 0.6) {
+        onsets++;
+        quiet = 0;
+      }
+    }
+
+    intensity = 1;
+    await wait(4000);
+    const fast = { ...audio.musicPosition };
+    audio.musicCue('calm');
+    await wait(2600);
+    const back = audio.musicPosition?.section;
+    clearInterval(pump);
+    audio.musicBus.disconnect(tap);
+    audio.stopMusic();
+    await wait(300);
+    game.state = prev;
+    return { calm, fight, mean, peak, onsets, fast, back, stopped: audio.musicPosition === null };
+  });
+  check('the music starts in its between-rounds breakdown', music.calm === 'C', `section ${music.calm}`);
+  check('a round kicks the music into the tune', music.fight.section === 'A', `section ${music.fight.section}, ${music.fight.bpm} BPM`);
+  check('the music is audible and does not clip', music.mean > 0.01 && music.peak < 1, `rms ${music.mean.toFixed(3)}, peak ${music.peak.toFixed(2)}`);
+  check('the music has a beat', music.onsets >= 6, `${music.onsets} onsets in 2.5 s`);
+  check(
+    'the music speeds up and hits harder with the horde',
+    music.fast.bpm > music.fight.bpm + 8 && music.fast.level >= music.fight.level,
+    `${music.fight.bpm} → ${music.fast.bpm} BPM, drums ${music.fight.level} → ${music.fast.level}`,
+  );
+  check('between rounds the music drops back to the breakdown', music.back === 'C', `section ${music.back}`);
+  check('the music stops', music.stopped);
+
+  // ---------------------------------------- health bars and damage numbers
+  const tags = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    game.newRun(123456);
+    game.pool.reset();
+    const p = game.player;
+    const step = (n) => { for (let i = 0; i < n; i++) game.update(1 / 60); };
+    const shown = (sel) => [...document.querySelectorAll(`#tags ${sel}`)].filter((n) => n.style.display === 'block');
+    const fx = -Math.sin(p.yaw);
+    const fz = -Math.cos(p.yaw);
+    let d = 12;
+    while (d > 4 && !game.grid.lineOfSight(p.x, p.z, p.x + fx * d, p.z + fz * d)) d--;
+    const e = game.pool.acquire('walker');
+    e.spawn('walker', p.x + fx * d, p.z + fz * d, 500, 3, null, game.rng);
+    e.state = 'hunt';
+    e.shocked = 99; // stunned where it stands
+    step(4);
+    const out = { fresh: game.tags.visible };
+
+    // A two-pellet hit reads as one number.
+    game.damageEnemy(e, 120, false, false, { x: e.x, y: 2.5, z: e.z });
+    game.damageEnemy(e, 30, false, false, { x: e.x, y: 2.5, z: e.z });
+    step(3);
+    out.hurt = game.tags.visible;
+    out.numbers = shown('.dmg').map((n) => n.textContent);
+    const bar = shown('.ztag')[0];
+    out.fill = bar ? bar.querySelector('.fill').style.transform : '';
+    out.barAbove = bar ? bar.getBoundingClientRect().top < window.innerHeight / 2 + 40 : false;
+
+    step(15);
+    game.damageEnemy(e, 50, true, false, { x: e.x, y: 3.2, z: e.z });
+    step(2);
+    out.head = shown('.dmg.head').map((n) => n.textContent);
+
+    game.tags.showNumbers = false;
+    step(15);
+    game.damageEnemy(e, 10, false, false, { x: e.x, y: 2.5, z: e.z });
+    step(2);
+    out.numbersOff = shown('.dmg').filter((n) => n.textContent === '10').length;
+    game.tags.showNumbers = true;
+    game.tags.showBars = false;
+    step(20);
+    out.barsOff = game.tags.visible.bars;
+    game.tags.showBars = true;
+
+    step(15);
+    game.damageEnemy(e, 5000, true, false, { x: e.x, y: 3.2, z: e.z });
+    step(2);
+    out.kill = shown('.dmg.kill').map((n) => n.textContent);
+    step(90);
+    out.after = game.tags.visible;
+    return out;
+  });
+  check('a zombie at full health has no bar', tags.fresh.bars === 0);
+  check('a hurt zombie shows a health bar above it', tags.hurt.bars === 1 && tags.barAbove, `${tags.hurt.bars} bars, ${tags.fill}`);
+  check('the bar shows the health left', /^scaleX\(0\.70*\)$/.test(tags.fill), tags.fill);
+  check('pellets landing together read as one number', tags.numbers.join() === '150', tags.numbers.join() || 'none');
+  check('a headshot gets its own number', tags.head.join() === '50', tags.head.join() || 'none');
+  check('a kill shows the damage it took to finish it', tags.kill.join() === '290', tags.kill.join() || 'none');
+  check('health bars and damage numbers can be turned off', tags.numbersOff === 0 && tags.barsOff === 0, `${tags.numbersOff} numbers, ${tags.barsOff} bars`);
+  check("the numbers and the dead zombie's bar clear away", tags.after.bars === 0 && tags.after.numbers === 0, JSON.stringify(tags.after));
+
   // ------------------------------------------------------------ four maps
   const sweep = await page.evaluate(() => {
     const { game } = window.__RZA;
@@ -620,7 +844,8 @@ try {
       let sky = false;
       game.level.group.traverse((o) => { if (o.renderOrder === -1000) sky = true; });
       out[id] = {
-        ms: Math.round(ms), map: game.mapId, parts: game.questProps.parts.length, sky,
+        ms: Math.round(ms), map: game.mapId, sky,
+        props: game.questProps.parts.length === game.quest.parts.length && game.questProps.valves.length === game.quest.valves.length,
         boxes: game.boxes.units.filter((u) => u.enabled).length, state: game.state,
         banner: document.getElementById('banner').textContent,
       };
@@ -630,7 +855,7 @@ try {
   const wantBoxes = { asylum: 1, town: 2, foundry: 2, labs: 2 };
   const wantSky = { asylum: false, town: true, foundry: true, labs: false };
   for (const [id, r] of Object.entries(sweep)) {
-    check(`maps: ${id} builds and plays`, r.map === id && r.state === 'playing' && r.parts === 3, `${r.ms} ms, "${r.banner}"`);
+    check(`maps: ${id} builds and plays, with its chapter's props`, r.map === id && r.state === 'playing' && r.props, `${r.ms} ms, "${r.banner}"`);
     check(`maps: ${id} runs ${wantBoxes[id]} mystery box(es)`, r.boxes === wantBoxes[id], `${r.boxes}`);
     check(`maps: ${id} ${wantSky[id] ? 'has' : 'has no'} open sky`, r.sky === wantSky[id]);
     check(`maps: ${id} builds in reasonable time`, r.ms < 8000, `${r.ms} ms under swiftshader`);
@@ -687,6 +912,115 @@ try {
   });
   for (const [k, v] of Object.entries(story)) check(`story: ${k}`, v === true);
 
+  // ------------------------------------------------- each chapter's own jobs
+  const jobs = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    const step = (n) => { for (let i = 0; i < n; i++) { game.player.health = game.player.maxHealth; game.update(1 / 60); } };
+    const at = (v) => { game.player.x = v.x; game.player.z = v.z; };
+    const prompt = () => game.findInteractable()?.label ?? '';
+    const prog = (i) => document.querySelectorAll('#objective-list li')[i]?.querySelector('.prog')?.textContent.trim() ?? '';
+    const calm = () => { game.pool.reset(); game.roundPhase = 'clear'; game.phaseTimer = 1e9; };
+
+    // The town: build the beacon, then hold it.
+    game.newRun(31337, 'town');
+    game.input.locked = true;
+    game.player.award(1e6);
+    for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+    calm();
+    out.townTwoParts = game.questProps.parts.length === 2 && game.questProps.valves.length === 0;
+    game.turnOnPower();
+    game.takePart(0);
+    game.takePart(1);
+    game.buildDevice();
+    out.townDefends = game.quest.stage === 'defend' && game.quest.boss === 'none';
+    step(2);
+    out.townRingShows = game.questProps.ring.group.visible;
+    const bench = game.questProps.bench.center;
+    at({ x: game.layout.spawn.tx * 4 + 2, z: game.layout.spawn.tz * 4 + 2 });
+    step(60);
+    out.townAwayHoldsNothing = game.quest.held === 0 && prog(3) === 'GET BACK TO IT';
+    at(bench);
+    step(60);
+    out.townNearCounts = game.quest.held > 0.8 && /^0:5\d$/.test(prog(3));
+    // The horde keeps coming past the round's count.
+    game.roundPhase = 'active';
+    game.spawned = game.plan.total;
+    game.spawnTimer = 0;
+    const before = game.spawned;
+    step(30);
+    out.townSurges = game.spawned > before;
+    game.quest.held = 59.9;
+    step(12);
+    out.townBossComes = game.quest.boss === 'coming' && !game.questProps.ring.group.visible;
+
+    // The ironworks: valves against the clock, then feed the crucible.
+    game.newRun(31337, 'foundry');
+    game.input.locked = true;
+    game.player.award(1e6);
+    for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+    calm();
+    const valves = game.questProps.valves;
+    out.foundryThreeValves = valves.length === 3 && game.questProps.parts.length === 0;
+    at(valves[0].center);
+    out.foundryNeedsPower = /NEEDS POWER/.test(prompt());
+    game.turnOnPower();
+    out.foundryPrompt = prompt() === 'OPEN THE STEAM VALVE';
+    game.findInteractable().act();
+    step(2);
+    out.foundryClockRuns = game.quest.valvesOpen === 1 && /^1:1\d$/.test(prog(1)) && valves[0].open;
+    game.quest.valveTimer = 0.05;
+    step(6);
+    out.foundryPressureLost = game.quest.valvesOpen === 0 && !valves[0].open && game.quest.valveTimer === 0;
+    for (let i = 0; i < 3; i++) game.openValve(i);
+    step(2);
+    out.foundryHarvests = game.quest.stage === 'harvest' && game.questProps.ring.group.visible && game.quest.deviceOn;
+    // A kill inside the ring feeds it; one out in the map does not.
+    const c = game.questProps.bench.center;
+    const spot = (() => {
+      for (let a = 0; a < 16; a++) {
+        const x = c.x + Math.cos((a / 16) * Math.PI * 2) * 6;
+        const z = c.z + Math.sin((a / 16) * Math.PI * 2) * 6;
+        if (game.grid.lineOfSight(c.x, c.z, x, z)) return { x, z };
+      }
+      return null;
+    })();
+    const near = game.pool.acquire('walker');
+    near.spawn('walker', spot.x, spot.z, 100, 1, null, game.rng);
+    near.state = 'hunt';
+    game.damageEnemy(near, 500, false, false, { x: spot.x, y: 2, z: spot.z });
+    const far = game.pool.acquire('walker');
+    far.spawn('walker', game.layout.spawn.tx * 4 + 2, game.layout.spawn.tz * 4 + 2, 100, 1, null, game.rng);
+    far.state = 'hunt';
+    game.damageEnemy(far, 500, false, false, { x: far.x, y: 2, z: far.z });
+    out.foundryOnlyNearKillsCount = game.quest.kills === 1;
+    at(c);
+    step(2);
+    out.foundryCountShown = prog(2) === '1/20';
+
+    // Sublevel 9: the vents stay locked until the keycard turns up.
+    game.newRun(31337, 'labs');
+    calm();
+    game.turnOnPower();
+    game.openValve(0);
+    out.labsVentsLocked = game.quest.valvesOpen === 0;
+    game.takePart(0);
+    game.openValve(0);
+    out.labsKeycardOpensThem = game.quest.valvesOpen === 1;
+
+    // Threat: the same round is tougher further down.
+    const health = {};
+    for (const map of ['asylum', 'labs']) {
+      game.newRun(31337, map);
+      game.startRound(3);
+      health[map] = game.plan.health;
+    }
+    out.laterChaptersHitHarder = health.labs > health.asylum * 1.4;
+    game.newRun(31337, 'asylum');
+    return out;
+  });
+  for (const [k, v] of Object.entries(jobs)) check(`jobs: ${k}`, v === true);
+
   // ------------------------------------------------------------- bosses
   const fights = await page.evaluate(() => {
     const { game } = window.__RZA;
@@ -700,8 +1034,7 @@ try {
       game.roundPhase = 'clear';
       game.phaseTimer = 1e9;
       game.turnOnPower();
-      for (let i = 0; i < 3; i++) game.takePart(i);
-      game.buildDevice();
+      game.quest.completeSteps();
       game.quest.bossTimer = 0;
       game.update(1 / 60);
       const boss = game.pool.boss;
@@ -771,7 +1104,9 @@ try {
     out.lockedStaysShut = shown('menu-maps') && !shown('menu-brief');
     cards[1].click();
     out.briefingOpens = shown('menu-brief') && document.getElementById('brief-title').textContent === 'OUTBREAK';
-    out.briefingListsSteps = document.querySelectorAll('#brief-steps li').length === 5;
+    // The town's own four jobs, then the boss and the way out.
+    out.briefingListsSteps = document.querySelectorAll('#brief-steps li').length === 6;
+    out.briefingShowsThreat = /THREAT/.test(document.getElementById('brief-chapter').textContent);
     document.getElementById('btn-brief-back').click();
     out.backToChapters = shown('menu-maps');
     return out;

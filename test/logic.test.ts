@@ -40,7 +40,9 @@ import {
 import {
   PERK_INFO,
   POWERUPS,
+  MAX_THREAT,
   enemyCount,
+  enemyDamage,
   enemyHealth,
   enemySpeed,
   isHoundRound,
@@ -54,7 +56,7 @@ import {
 
 import { MAPS, MAP_ORDER } from '../src/world/maps.ts';
 import { BOSS_DELAY, Quest } from '../src/game/quest.ts';
-import { CHAPTERS, UNLOCK_ROUND, type StoryBeat } from '../src/game/story.ts';
+import { CHAPTERS, UNLOCK_ROUND, beatsFor } from '../src/game/story.ts';
 import { defaultProgress, isUnlocked, nextMap, recordRun } from '../src/game/progress.ts';
 import { BOSSES, bossHealth } from '../src/game/boss.ts';
 
@@ -465,23 +467,60 @@ describe('maps', () => {
       assert.notEqual(L.workbench.zone, L.spawnZone);
     }
   });
+
+  it('valve spots are out in the map, spread across rooms where there are enough', () => {
+    for (const id of MAP_ORDER) {
+      for (let seed = 1; seed <= 20; seed++) {
+        const L = generateLayout(seed, MAPS[id]);
+        assert.equal(L.spots.length, 3);
+        assert.ok(L.spots.every((p) => p.zone !== L.spawnZone));
+        const rooms = L.zones.length - 1;
+        if (rooms >= 3) assert.equal(new Set(L.spots.map((p) => p.zone)).size, 3, `${id} seed ${seed}`);
+      }
+    }
+  });
 });
 
 describe('story and objectives', () => {
   it('every map has a chapter with everything the run needs', () => {
-    const beats: StoryBeat[] = ['start', 'power', 'part', 'parts', 'built', 'boss', 'bossDown'];
     MAP_ORDER.forEach((id, i) => {
       const c = CHAPTERS[id];
       assert.equal(c.map, id);
       assert.equal(c.number, i + 1);
-      assert.equal(c.parts.length, 3);
+      assert.ok(c.steps.length >= 3, `${id} has too little to do`);
+      assert.equal(c.steps[0].kind, 'power', `${id} should start with the power`);
       assert.ok(c.briefing.length > 0 && c.ending.length > 0);
-      for (const b of beats) assert.ok(c.radio[b]?.length, `${id} has nothing to say about ${b}`);
+      for (const b of beatsFor(c.steps)) assert.ok(c.radio[b]?.length, `${id} has nothing to say about ${b}`);
       assert.ok(BOSSES[c.boss], `${id} names a boss that does not exist`);
+      const parts = c.steps.find((s) => s.kind === 'parts');
+      if (parts) assert.ok(parts.names.length >= 1 && parts.names.length <= 3, 'a layout only has three part crates');
     });
   });
 
-  it('runs power, parts, build, boss and escape in order', () => {
+  it('no two chapters ask for the same jobs', () => {
+    const chains = MAP_ORDER.map((id) => CHAPTERS[id].steps.map((s) => s.kind).join(' > '));
+    assert.equal(new Set(chains).size, chains.length, chains.join(' | '));
+  });
+
+  it('each chapter asks more of you than the last', () => {
+    // More jobs, or harder versions of them: every chapter after the first adds a timed or held job.
+    const weight = (id: (typeof MAP_ORDER)[number]): number => CHAPTERS[id].steps.reduce((n, s) => {
+      if (s.kind === 'valves') return n + 2 + 60 / s.window;
+      if (s.kind === 'harvest') return n + 2 + s.kills / 20;
+      if (s.kind === 'defend') return n + 2 + s.seconds / 60;
+      return n + 1;
+    }, 0);
+    for (let i = 1; i < MAP_ORDER.length; i++) {
+      assert.ok(weight(MAP_ORDER[i]) > weight(MAP_ORDER[i - 1]), `${MAP_ORDER[i]} is no harder than ${MAP_ORDER[i - 1]}`);
+    }
+    // The same valves get less time, the same defence lasts longer.
+    assert.ok((CHAPTERS.labs.steps.find((s) => s.kind === 'valves') as { window: number }).window
+      < (CHAPTERS.foundry.steps.find((s) => s.kind === 'valves') as { window: number }).window);
+    assert.ok((CHAPTERS.labs.steps.find((s) => s.kind === 'defend') as { seconds: number }).seconds
+      > (CHAPTERS.town.steps.find((s) => s.kind === 'defend') as { seconds: number }).seconds);
+  });
+
+  it('asylum: power, parts and build, then boss and escape', () => {
     const q = new Quest('asylum');
     assert.equal(q.stage, 'power');
     assert.equal(q.canBuild, false);
@@ -500,11 +539,14 @@ describe('story and objectives', () => {
     assert.deepEqual(q.build(), [], 'it is only built once');
     assert.equal(q.boss, 'coming');
     assert.equal(q.canEscape, false);
-    assert.equal(q.tick(BOSS_DELAY / 2), false);
-    assert.equal(q.tick(BOSS_DELAY), true);
-    assert.equal(q.tick(0.1), true, 'keeps asking until the boss actually turns up');
+    q.tick(BOSS_DELAY / 2);
+    assert.equal(q.bossDue, false);
+    q.tick(BOSS_DELAY);
+    assert.equal(q.bossDue, true);
+    q.tick(0.1);
+    assert.equal(q.bossDue, true, 'keeps asking until the boss actually turns up');
     assert.deepEqual(q.bossArrived(), ['boss']);
-    assert.equal(q.tick(1), false);
+    assert.equal(q.bossDue, false);
     assert.equal(q.stage, 'boss');
     assert.deepEqual(q.escape(), [], 'no escaping with the boss alive');
     assert.deepEqual(q.bossKilled(), ['bossDown']);
@@ -513,8 +555,86 @@ describe('story and objectives', () => {
     assert.equal(q.stage, 'done');
   });
 
-  it('shows the objectives that matter right now', () => {
+  it('town: the beacon has to be defended, and only counts while you stay near it', () => {
     const q = new Quest('town');
+    assert.equal(q.parts.length, 2);
+    q.powerOn();
+    q.takePart(0);
+    q.takePart(1);
+    assert.deepEqual(q.build(), ['built', 'defend']);
+    assert.equal(q.stage, 'defend');
+    assert.equal(q.defending, true);
+    assert.equal(q.boss, 'none', 'the boss waits for the defence');
+    assert.deepEqual(q.tick(20, false), [], 'wandering off holds nothing');
+    assert.equal(q.held, 0);
+    assert.equal(q.objectives()[3].progress, 'GET BACK TO IT');
+    assert.equal(q.objectives()[3].alert, true);
+    assert.deepEqual(q.tick(31, true), ['defendHalf']);
+    assert.equal(q.objectives()[3].progress, '0:29');
+    assert.deepEqual(q.tick(29.5, true), ['defended']);
+    assert.equal(q.boss, 'coming');
+    assert.equal(q.stage, 'boss');
+  });
+
+  it('foundry: valves against the clock, then feed the crucible', () => {
+    const q = new Quest('foundry');
+    assert.equal(q.parts.length, 0);
+    assert.equal(q.valves.length, 3);
+    assert.deepEqual(q.openValve(0), [], 'no valves before the turbines');
+    q.powerOn();
+    assert.equal(q.stage, 'valves');
+    assert.deepEqual(q.openValve(0), ['valve']);
+    assert.deepEqual(q.openValve(0), [], 'a valve only opens once');
+    assert.equal(q.valveTimer, 75);
+    assert.match(q.objectives()[1].text, /1\/3/);
+    assert.equal(q.objectives()[1].progress, '1:15');
+    q.openValve(2);
+    // Too slow: they all slam shut and the clock stops.
+    assert.deepEqual(q.tick(80), ['valvesLost']);
+    assert.equal(q.valvesOpen, 0);
+    assert.equal(q.valveTimer, 0);
+    assert.deepEqual(q.tick(30), [], 'no clock until the first one is open again');
+    // Fast enough this time.
+    q.openValve(1);
+    q.tick(20);
+    q.openValve(0);
+    assert.equal(q.deviceOn, false);
+    assert.deepEqual(q.openValve(2), ['valves', 'harvest']);
+    assert.equal(q.deviceOn, true, 'the crucible lights');
+    assert.equal(q.stage, 'harvest');
+    const beats: string[] = [];
+    for (let i = 0; i < 20; i++) beats.push(...q.harvest());
+    assert.deepEqual(beats, ['harvestHalf', 'harvested']);
+    assert.deepEqual(q.harvest(), [], 'full is full');
+    assert.equal(q.boss, 'coming');
+  });
+
+  it('labs: the keycard, then the vents, then hold the purge', () => {
+    const q = new Quest('labs');
+    q.powerOn();
+    assert.equal(q.canOpenValves, false, 'the vents are locked without the keycard');
+    assert.deepEqual(q.openValve(0), []);
+    assert.deepEqual(q.takePart(0), ['parts']);
+    assert.equal(q.objectives()[1].text, 'FIND THE ACCESS KEYCARD');
+    for (let i = 0; i < 2; i++) q.openValve(i);
+    assert.equal(q.valveTimer, 50);
+    assert.deepEqual(q.openValve(2), ['valves', 'defend']);
+    assert.equal(q.stage, 'defend');
+    q.tick(90, true);
+    assert.equal(q.boss, 'coming');
+  });
+
+  it('completeSteps skips straight to the boss on every chapter', () => {
+    for (const id of MAP_ORDER) {
+      const q = new Quest(id);
+      q.completeSteps();
+      assert.equal(q.boss, 'coming', id);
+      assert.ok(q.objectives().every((o) => !o.done) && q.objectives()[0].text.startsWith('SOMETHING'));
+    }
+  });
+
+  it('shows the objectives that matter right now', () => {
+    const q = new Quest('asylum');
     const first = q.objectives();
     assert.equal(first.length, 3);
     assert.ok(first.every((o) => !o.done));
@@ -527,9 +647,9 @@ describe('story and objectives', () => {
     q.build();
     q.tick(BOSS_DELAY);
     q.bossArrived();
-    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.town.bossName));
+    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.asylum.bossName));
     q.bossKilled();
-    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.town.exit));
+    assert.match(q.objectives()[0].text, new RegExp(CHAPTERS.asylum.exit));
   });
 });
 
@@ -587,5 +707,43 @@ describe('bosses', () => {
       assert.ok(bossHealth(id, 10) > bossHealth(id, 5));
       assert.ok(bossHealth(id, 10) > enemyHealth(10) * 15, 'a boss is worth many zombies');
     }
+  });
+});
+
+describe('threat', () => {
+  it('every chapter is harder than the one before', () => {
+    for (let t = 1; t <= MAX_THREAT; t++) {
+      for (const r of [1, 5, 9, 15, 25]) {
+        assert.ok(enemyHealth(r, t) > enemyHealth(r, t - 1), `health at round ${r}`);
+        assert.ok(enemyCount(r, t) >= enemyCount(r, t - 1), `count at round ${r}`);
+        assert.ok(spawnInterval(r, t) <= spawnInterval(r, t - 1), `interval at round ${r}`);
+        assert.ok(maxAlive(r, t) >= maxAlive(r, t - 1), `max alive at round ${r}`);
+        assert.ok(enemySpeed(r, 'walker', t) > enemySpeed(r, 'walker', t - 1), `speed at round ${r}`);
+        assert.ok(enemyDamage('walker', t) > enemyDamage('walker', t - 1));
+      }
+    }
+    // Sublevel 9's first round is a real fight, not a massacre.
+    assert.ok(enemyHealth(1, MAX_THREAT) < enemyHealth(4));
+  });
+
+  it('runners and brutes arrive earlier in the later chapters', () => {
+    const firstRound = (kind: string, threat: number): number => {
+      for (let r = 1; r < 40; r++) {
+        if (roundMix(r, threat).some((m) => m.kind === kind && m.weight > 0)) return r;
+      }
+      return 99;
+    };
+    assert.ok(firstRound('runner', MAX_THREAT) < firstRound('runner', 0));
+    assert.ok(firstRound('brute', MAX_THREAT) < firstRound('brute', 0));
+  });
+
+  it('keeps the pool from running dry at any threat', () => {
+    for (let t = 0; t <= MAX_THREAT; t++) {
+      for (let r = 1; r <= 100; r++) assert.ok(planRound(r, t).maxAlive <= 28);
+    }
+  });
+
+  it('each chapter carries its own threat', () => {
+    MAP_ORDER.forEach((id, i) => assert.equal(new Quest(id).threat, i));
   });
 });

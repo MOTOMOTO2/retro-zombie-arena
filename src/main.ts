@@ -6,7 +6,7 @@ import './style.css';
 import { audio } from './core/audio.ts';
 import { DEFAULT_QUALITY, QUALITY_PRESETS, type RetroQuality } from './core/retro.ts';
 import { Game, type GameState, type RunStats } from './game/game.ts';
-import { CHAPTERS, UNLOCK_ROUND } from './game/story.ts';
+import { CHAPTERS, UNLOCK_ROUND, threatOf, type Chapter, type StepDef } from './game/story.ts';
 import { isUnlocked, loadProgress, nextMap, previousMap, recordRun, saveProgress } from './game/progress.ts';
 import { MAPS, MAP_ORDER } from './world/maps.ts';
 import type { MapId } from './world/mapdata.ts';
@@ -19,18 +19,24 @@ type Settings = {
   quality: keyof typeof QUALITY_PRESETS;
   sensitivity: number;
   volume: number;
+  musicVolume: number;
   invertY: boolean;
   fov: number;
   brightness: number;
+  healthBars: boolean;
+  damageNumbers: boolean;
 };
 
 const DEFAULTS: Settings = {
   quality: DEFAULT_QUALITY,
   sensitivity: 22,
   volume: 70,
+  musicVolume: 70,
   invertY: false,
   fov: 80,
   brightness: 50,
+  healthBars: true,
+  damageNumbers: true,
 };
 
 /** Maps the 0..100 brightness slider to a linear exposure, 50 being neutral. */
@@ -74,6 +80,33 @@ function saveSettings(s: Settings): void {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
   } catch {
     /* private browsing; settings just will not persist */
+  }
+}
+
+const THREAT_NAMES = ['LOW', 'RISING', 'HIGH', 'EXTREME'];
+
+/** The chapter's threat as four pips and a word. */
+function threatBadge(c: Chapter): string {
+  const t = threatOf(c);
+  const pips = [0, 1, 2, 3].map((i) => `<i${i <= t ? ' class="on"' : ''}></i>`).join('');
+  return `<span class="threat t${t}">THREAT ${pips} ${THREAT_NAMES[t]}</span>`;
+}
+
+/** One job of a chapter, as the briefing lists it. */
+function stepLine(c: Chapter, s: StepDef): string {
+  switch (s.kind) {
+    case 'power':
+      return `<b>${s.text}</b>`;
+    case 'parts':
+      return `FIND THE <b>${s.names.join('</b>, THE <b>')}</b>`;
+    case 'build':
+      return `BUILD THE <b>${c.device}</b> AT THE WORKBENCH`;
+    case 'valves':
+      return `OPEN ALL THREE <b>${s.name}S</b> WITHIN <b>${s.window} SECONDS</b> &mdash; THEY ALL SHUT AGAIN IF YOU ARE TOO SLOW`;
+    case 'harvest':
+      return `<b>${s.text}</b> &mdash; KILL <b>${s.kills}</b> OF THEM INSIDE ITS RING`;
+    case 'defend':
+      return `DEFEND THE <b>${c.device}</b> FOR <b>${s.seconds} SECONDS</b> &mdash; STAY INSIDE ITS RING WHILE THEY SWARM IT`;
   }
 }
 
@@ -129,9 +162,12 @@ function boot(): void {
   const qualitySel = el<HTMLSelectElement>('opt-quality');
   const sensInput = el<HTMLInputElement>('opt-sens');
   const volInput = el<HTMLInputElement>('opt-vol');
+  const musicInput = el<HTMLInputElement>('opt-music');
   const invertInput = el<HTMLInputElement>('opt-invert');
   const fovInput = el<HTMLInputElement>('opt-fov');
   const brightInput = el<HTMLInputElement>('opt-bright');
+  const barsInput = el<HTMLInputElement>('opt-bars');
+  const numbersInput = el<HTMLInputElement>('opt-numbers');
 
   const applySettings = (): void => {
     game.setQuality(QUALITY_PRESETS[settings.quality] as RetroQuality);
@@ -140,16 +176,23 @@ function boot(): void {
     game.setFov(settings.fov);
     game.retro.setExposure(exposureFor(settings.brightness));
     audio.setVolume(settings.volume / 100);
+    audio.setMusicVolume(settings.musicVolume / 100);
+    game.tags.showBars = settings.healthBars;
+    game.tags.showNumbers = settings.damageNumbers;
     el('val-sens').textContent = (settings.sensitivity / 10).toFixed(1);
     el('val-vol').textContent = String(settings.volume);
+    el('val-music').textContent = String(settings.musicVolume);
     el('val-fov').textContent = String(settings.fov);
     el('val-bright').textContent = String(settings.brightness);
     qualitySel.value = settings.quality;
     sensInput.value = String(settings.sensitivity);
     volInput.value = String(settings.volume);
+    musicInput.value = String(settings.musicVolume);
     invertInput.checked = settings.invertY;
     fovInput.value = String(settings.fov);
     brightInput.value = String(settings.brightness);
+    barsInput.checked = settings.healthBars;
+    numbersInput.checked = settings.damageNumbers;
     saveSettings(settings);
   };
 
@@ -165,6 +208,10 @@ function boot(): void {
     settings.volume = Number(volInput.value);
     applySettings();
   });
+  musicInput.addEventListener('input', () => {
+    settings.musicVolume = Number(musicInput.value);
+    applySettings();
+  });
   invertInput.addEventListener('change', () => {
     settings.invertY = invertInput.checked;
     applySettings();
@@ -175,6 +222,14 @@ function boot(): void {
   });
   brightInput.addEventListener('input', () => {
     settings.brightness = Number(brightInput.value);
+    applySettings();
+  });
+  barsInput.addEventListener('change', () => {
+    settings.healthBars = barsInput.checked;
+    applySettings();
+  });
+  numbersInput.addEventListener('change', () => {
+    settings.damageNumbers = numbersInput.checked;
     applySettings();
   });
 
@@ -219,6 +274,7 @@ function boot(): void {
         `<span class="name">${MAPS[m].name}</span>` +
         `<span class="ttl">${c.title}</span>` +
         `<span class="blurb">${open ? c.blurb : '???'}</span>` +
+        threatBadge(c) +
         `<span class="status">${status}</span>`;
       card.addEventListener('click', () => {
         if (!open) {
@@ -242,13 +298,11 @@ function boot(): void {
   const openBrief = (m: MapId): void => {
     selected = m;
     const c = CHAPTERS[m];
-    el('brief-chapter').textContent = `CHAPTER ${c.number}  \u00b7  ${MAPS[m].name}`;
     el('brief-title').textContent = c.title;
     el('brief-text').innerHTML = c.briefing.map((para) => `<p>${para}</p>`).join('');
+    el('brief-chapter').innerHTML = `CHAPTER ${c.number}  ·  ${MAPS[m].name}  ·  ${threatBadge(c)}`;
     el('brief-steps').innerHTML = [
-      '<b>RESTORE THE POWER</b>',
-      `FIND THE <b>${c.parts.join('</b>, THE <b>')}</b>`,
-      `BUILD THE <b>${c.device}</b> AT THE WORKBENCH`,
+      ...c.steps.map((s) => stepLine(c, s)),
       `SURVIVE <span class="boss">${c.bossName}</span> &mdash; ${c.bossNote}`,
       `ESCAPE THROUGH <b>${c.exit}</b>`,
     ].map((li) => `<li>${li}</li>`).join('');

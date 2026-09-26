@@ -145,6 +145,8 @@ export type Layout = {
   pack: WallProp;
   /** Where the three quest parts are found, in three different rooms. */
   parts: WallProp[];
+  /** Three more spots out in the map for the chapters with things to turn on (valves, vents). */
+  spots: WallProp[];
   /** Where the parts are built into whatever the chapter needs. */
   workbench: WallProp;
   /** The way out once the boss is dead. */
@@ -795,6 +797,26 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
   }
   if (boxPads.length < 3 || boxPads[0].zone !== startZone.id) return null;
 
+  // Three spots for valves and vents, spread out like the parts: in three
+  // different rooms where the map has them, never in the start room. Taking a
+  // slot rolls no dice, so this leaves everything above exactly as it was.
+  const spots: WallProp[] = [];
+  const spotZones = new Set<ZoneDef>();
+  for (const f of [0.3, 0.7, 1]) {
+    const want = Math.round(f * (byDepth.length - 1));
+    for (let k = 0; k < byDepth.length * 2 && spots.length < 3; k++) {
+      const z = byDepth[(want + k) % byDepth.length];
+      // First time round only rooms without a spot yet; then any room will do.
+      if (k < byDepth.length && spotZones.has(z)) continue;
+      const slot = takeSlot(z);
+      if (!slot) continue;
+      spots.push(slot);
+      spotZones.add(z);
+      break;
+    }
+  }
+  if (spots.length < 3) return null;
+
   /* -- 10. where the player wakes up -------------------------------------- */
   const r = startZone.rect;
   const cx = r.x + (r.w >> 1);
@@ -840,6 +862,7 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
     powerSwitch,
     pack,
     parts,
+    spots,
     workbench,
     exit,
     spawn: { tx: spawnTile.tx, tz: spawnTile.tz, yaw },
@@ -891,11 +914,14 @@ export function validateLayout(L: Layout): string[] {
   stand('power switch', L.powerSwitch, true);
   stand('pack-a-punch', L.pack, true);
   L.parts.forEach((p, i) => stand(`quest part ${i}`, p, true));
+  L.spots.forEach((p, i) => stand(`quest spot ${i}`, p, true));
   stand('workbench', L.workbench, true);
   stand('exit', L.exit, true);
   if (L.parts.length !== 3) errs.push('there must be three quest parts');
   if (new Set(L.parts.map((p) => p.zone)).size !== L.parts.length) errs.push('two quest parts share a room');
   if (L.parts.some((p) => p.zone === L.spawnZone)) errs.push('a quest part is in the start room');
+  if (L.spots.length !== 3) errs.push('there must be three quest spots');
+  if (L.spots.some((p) => p.zone === L.spawnZone)) errs.push('a quest spot is in the start room');
   if (L.workbench.zone === L.spawnZone) errs.push('the workbench is in the start room');
   if (L.exit.zone !== L.spawnZone) errs.push('the exit is not in the start room');
 
@@ -950,6 +976,7 @@ export function validateLayout(L: Layout): string[] {
     ['power switch', L.powerSwitch],
     ['pack-a-punch', L.pack],
     ...L.parts.map((p, i): [string, WallProp] => [`quest part ${i}`, p]),
+    ...L.spots.map((p, i): [string, WallProp] => [`quest spot ${i}`, p]),
     ['workbench', L.workbench],
     ['exit', L.exit],
   ];

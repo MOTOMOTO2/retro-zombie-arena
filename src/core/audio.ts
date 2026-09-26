@@ -1,17 +1,74 @@
 /**
- * All sound is synthesised with the Web Audio API at runtime - no audio files.
- * Gunshots are a filtered noise burst layered over a pitch-swept body tone,
+ * Sound is synthesised with the Web Audio API at runtime; the only audio files
+ * are the spoken lines (see the end of this comment). Gunshots are a filtered noise burst layered over a pitch-swept body tone,
  * which is roughly how the sample packs of the era were made in the first place.
  *
  * The dead get a real voice: a raspy glottal buzz with a vocal-fry rattle,
  * pushed through three vowel formants that glide as the groan goes on
  * ("oooaaahhh"), then into a generated reverb so it rolls down the halls.
- * A voice limiter keeps a thirty-strong horde from turning into mush.
+ * A voice limiter keeps a thirty-strong horde from turning into mush. The
+ * player's grunts come out of the same throat, tuned human.
+ *
+ * Anything in the world is heard through a head-related panner that follows
+ * the listener as they turn, so a moan that started on your left moves to your
+ * right when you spin round, and a zombie behind you sounds behind you.
+ *
+ * The one exception to "all synthesised" is speech: words need a real voice.
+ * The announcer and the player's callouts are recorded lines (see voice.ts),
+ * but they still play through this mix - the announcer pitched down, doubled
+ * and drenched in the room - so they duck the music and follow the volume.
+ *
+ * The soundtrack is an arcade chiptune sequenced live; see music.ts.
  */
 
 import type { WeaponDef } from '../game/weapons.ts';
+import { ArcadeMusic, type MusicCue } from './music.ts';
+import { CALLOUT_GAP, CALLOUT_PACE, VoiceBank, type AnnouncerLine, type PlayerLine } from './voice.ts';
+
+export type { AnnouncerLine, MusicCue, PlayerLine };
 
 type Vec = { x: number; z: number };
+
+/**
+ * A point in the world a sound comes from. Its panner is made the first time
+ * something is routed to it, so a sound too quiet to play costs nothing.
+ */
+type Spot = { x: number; z: number; far: number; dry?: AudioNode; wet?: AudioNode | null };
+
+/** A fixed stereo position (interface sounds, the player's own kit) or a spot in the world. */
+type Place = number | Spot;
+
+/** Closer than this a sound is inside your own head, so it plays dead centre. */
+const NEAR = 0.6;
+
+/** The music bus at the top of the music slider; the default of 70 sits at about 0.32. */
+const MUSIC_LEVEL = 0.46;
+
+/** The announcer plays slowed like an old sampler, which drops his voice to a rumble. */
+const ANNOUNCER_RATE = 0.9;
+
+/** What a throat does over one utterance. */
+type Throat = {
+  dur: number;
+  /** Fundamental in Hz, and the ratios it climbs to (by 30%) and sags to (by the end). */
+  f0: number;
+  rise: number;
+  fall: number;
+  /** Three vowels the formants glide through. */
+  vowels: string[];
+  breath: number;
+  fry: number;
+  fryHz: number;
+  grit: number;
+  level: number;
+  attack: number;
+  /** Vibrato depth as a fraction of f0. */
+  wobble?: number;
+  /** A long moan breathes: two swells instead of one decay. */
+  swell?: boolean;
+};
+
+export type Grunt = 'light' | 'hard' | 'agony' | 'death';
 
 export type ZombieVoice = 'moan' | 'growl' | 'snarl' | 'scream' | 'death';
 
@@ -33,7 +90,12 @@ const VOWELS: Record<string, [number, number, number]> = {
 
 type Active = { out: GainNode; end: number; loud: number };
 
+/** A spoken line in flight: its fader, and when it finishes. */
+type Speech = { out: GainNode; end: number };
+
 const MAX_VOICES = 7;
+
+const rand = (a: number, b: number): number => a + Math.random() * (b - a);
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -44,13 +106,22 @@ export class AudioEngine {
   private noiseBuffer: AudioBuffer | null = null;
   private shaper: Float32Array | null = null;
   private listener: Vec = { x: 0, z: 0 };
-  private listenerYaw = 0;
-  private musicNodes: AudioScheduledSourceNode[] = [];
-  private musicTimer = 0;
+  private music: ArcadeMusic | null = null;
   private musicIntensity = 0;
   private voices: Active[] = [];
+  private lastGrunt = -1;
+  private readonly bank = new VoiceBank();
+  private voicesLoading: Promise<void> = Promise.resolve();
+  /** Who is talking, so a more important line can cut them off. */
+  private mouth: Speech | null = null;
+  private announcer: Speech | null = null;
+  private readonly calloutReady = new Map<PlayerLine, number>();
+  /** What was last said, and by whom. Used by the smoke test. */
+  lastLine = '';
   muted = false;
   volume = 0.7;
+  /** The music slider, 0..1, on top of the master volume. */
+  musicVolume = 0.7;
 
   /** Must be called from a user gesture. */
   async resume(): Promise<void> {
@@ -69,8 +140,11 @@ export class AudioEngine {
       this.sfxBus.connect(this.master);
 
       this.musicBus = this.ctx.createGain();
-      this.musicBus.gain.value = 0.55;
+      this.musicBus.gain.value = this.musicLevel;
       this.musicBus.connect(this.master);
+
+      // The spoken lines download in the background; nothing waits on them.
+      this.voicesLoading = this.bank.load(this.ctx);
 
       // One second of white noise, reused for every noise-based voice.
       const len = this.ctx.sampleRate;
@@ -127,56 +201,124 @@ export class AudioEngine {
     if (this.master && !this.muted) this.master.gain.value = this.volume;
   }
 
+  /** The music's own level, 0..1, under the master volume. */
+  setMusicVolume(v: number): void {
+    this.musicVolume = Math.max(0, Math.min(1, v));
+    if (!this.musicBus) return;
+    const g = this.musicBus.gain;
+    g.cancelScheduledValues(this.t);
+    g.setTargetAtTime(this.musicLevel, this.t, 0.03);
+  }
+
+  private get musicLevel(): number {
+    return MUSIC_LEVEL * this.musicVolume;
+  }
+
+  /**
+   * Moves the ears. Called every frame, and every sound already playing in the
+   * world re-pans to match, which is what keeps direction honest while you turn.
+   */
   setListener(pos: Vec, yaw: number): void {
     this.listener = pos;
-    this.listenerYaw = yaw;
+    const l = this.ctx?.listener;
+    if (!l) return;
+    // Same convention as the camera: yaw 0 looks down -z, +x is to the right.
+    const fx = -Math.sin(yaw);
+    const fz = -Math.cos(yaw);
+    if (l.forwardX) {
+      l.positionX.value = pos.x;
+      l.positionY.value = 0;
+      l.positionZ.value = pos.z;
+      l.forwardX.value = fx;
+      l.forwardY.value = 0;
+      l.forwardZ.value = fz;
+      l.upX.value = 0;
+      l.upY.value = 1;
+      l.upZ.value = 0;
+    } else {
+      // Firefox only has the old setters.
+      l.setPosition(pos.x, 0, pos.z);
+      l.setOrientation(fx, 0, fz, 0, 1, 0);
+    }
   }
 
   private get t(): number {
     return this.ctx ? this.ctx.currentTime : 0;
   }
 
-  /** Gain and stereo pan for a world position, relative to the listener. */
-  private spatial(at?: Vec, maxDist = 70): { gain: number; pan: number } {
-    if (!at) return { gain: 1, pan: 0 };
+  /** Distance gain for a world position, and where it plays from. */
+  private spatial(at?: Vec, maxDist = 70): { gain: number; place: Place } {
+    if (!at) return { gain: 1, place: 0 };
     const dx = at.x - this.listener.x;
     const dz = at.z - this.listener.z;
     const d = Math.hypot(dx, dz);
-    if (d > maxDist) return { gain: 0, pan: 0 };
+    if (d > maxDist) return { gain: 0, place: 0 };
     const gain = Math.pow(1 - d / maxDist, 1.8);
-    // Rotate into view space so left really is left.
-    const sin = Math.sin(this.listenerYaw);
-    const cos = Math.cos(this.listenerYaw);
-    const right = dx * cos - dz * sin;
-    const pan = d > 0.01 ? Math.max(-1, Math.min(1, right / Math.max(4, d))) : 0;
-    return { gain, pan };
+    return { gain, place: d < NEAR ? 0 : { x: at.x, z: at.z, far: d / maxDist } };
   }
 
-  private route(source: AudioNode, gainValue: number, pan: number, reverb = 0): GainNode | null {
+  /** The panner a spot plays through, made on first use and shared by every layer of the sound. */
+  private spotNodes(s: Spot): { dry: AudioNode; wet: AudioNode | null } {
+    if (s.dry) return { dry: s.dry, wet: s.wet ?? null };
+    const ctx = this.ctx as AudioContext;
+    const p = ctx.createPanner();
+    p.panningModel = 'HRTF';
+    // Distance is already in the gain; the panner only supplies direction.
+    p.distanceModel = 'linear';
+    p.rolloffFactor = 0;
+    if (p.positionX) {
+      p.positionX.value = s.x;
+      p.positionY.value = 0;
+      p.positionZ.value = s.z;
+    } else {
+      p.setPosition(s.x, 0, s.z);
+    }
+    p.connect(this.sfxBus as GainNode);
+    s.dry = p;
+    s.wet = null;
+    if (this.reverbSend) {
+      // The room answers from all round, and more of what reaches you from
+      // far off is room: that ratio is most of how the ear judges distance.
+      const w = ctx.createGain();
+      w.gain.value = 1 + s.far * 1.2;
+      w.connect(this.reverbSend);
+      s.wet = w;
+    }
+    return { dry: p, wet: s.wet };
+  }
+
+  private route(source: AudioNode, gainValue: number, place: Place, reverb = 0): GainNode | null {
     if (!this.ctx || !this.sfxBus) return null;
     const g = this.ctx.createGain();
     g.gain.value = gainValue;
     source.connect(g);
     let out: AudioNode = g;
-    if (typeof this.ctx.createStereoPanner === 'function') {
-      const p = this.ctx.createStereoPanner();
-      p.pan.value = pan;
-      g.connect(p);
-      out = p;
+    let wet = this.reverbSend as AudioNode | null;
+    if (typeof place !== 'number') {
+      const spot = this.spotNodes(place);
+      g.connect(spot.dry);
+      wet = spot.wet;
+    } else {
+      if (typeof this.ctx.createStereoPanner === 'function') {
+        const p = this.ctx.createStereoPanner();
+        p.pan.value = place;
+        g.connect(p);
+        out = p;
+      }
+      out.connect(this.sfxBus);
     }
-    out.connect(this.sfxBus);
-    if (reverb > 0 && this.reverbSend) {
+    if (reverb > 0 && wet) {
       const send = this.ctx.createGain();
       send.gain.value = reverb;
       out.connect(send);
-      send.connect(this.reverbSend);
+      send.connect(wet);
     }
     return g;
   }
 
   private noise(
     duration: number, filterType: BiquadFilterType, freq: number, q: number,
-    gainValue: number, pan: number, decayShape = 3, reverb = 0, delay = 0, freqTo = 0,
+    gainValue: number, place: Place, decayShape = 3, reverb = 0, delay = 0, freqTo = 0,
   ): void {
     if (!this.ctx || !this.noiseBuffer || gainValue <= 0.001) return;
     const src = this.ctx.createBufferSource();
@@ -190,7 +332,7 @@ export class AudioEngine {
     filter.Q.value = q;
     src.connect(filter);
 
-    const g = this.route(filter, gainValue, pan, reverb);
+    const g = this.route(filter, gainValue, place, reverb);
     if (!g) return;
     g.gain.setValueAtTime(gainValue, now);
     g.gain.exponentialRampToValueAtTime(0.0008, now + duration * decayShape * 0.4);
@@ -200,7 +342,7 @@ export class AudioEngine {
 
   private tone(
     type: OscillatorType, from: number, to: number, duration: number,
-    gainValue: number, pan: number, delay = 0, reverb = 0,
+    gainValue: number, place: Place, delay = 0, reverb = 0,
   ): void {
     if (!this.ctx || gainValue <= 0.001) return;
     const osc = this.ctx.createOscillator();
@@ -209,7 +351,7 @@ export class AudioEngine {
     osc.frequency.setValueAtTime(Math.max(20, from), now);
     osc.frequency.exponentialRampToValueAtTime(Math.max(20, to), now + duration);
 
-    const g = this.route(osc, 0.0001, pan, reverb);
+    const g = this.route(osc, 0.0001, place, reverb);
     if (!g) return;
     g.gain.setValueAtTime(0.0001, now);
     g.gain.exponentialRampToValueAtTime(gainValue, now + 0.008);
@@ -221,14 +363,14 @@ export class AudioEngine {
   /* -------------------------------------------------------------- weapons */
 
   shot(def: WeaponDef, at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 120);
+    const { gain, place } = this.spatial(at, 120);
     if (gain <= 0.001) return;
     const v = def.voice;
-    this.noise(0.05, 'bandpass', 900 + v.freq * 2, 0.9, 0.55 * gain * v.noise, pan, 3.2 * v.decay * 10, 0.25);
-    this.tone('square', v.freq * 1.6, v.freq * 0.35, v.decay, 0.32 * gain * v.body, pan);
-    this.tone('sine', v.freq * 0.7, v.freq * 0.2, v.decay * 1.5, 0.22 * gain * v.body, pan);
+    this.noise(0.05, 'bandpass', 900 + v.freq * 2, 0.9, 0.55 * gain * v.noise, place, 3.2 * v.decay * 10, 0.25);
+    this.tone('square', v.freq * 1.6, v.freq * 0.35, v.decay, 0.32 * gain * v.body, place);
+    this.tone('sine', v.freq * 0.7, v.freq * 0.2, v.decay * 1.5, 0.22 * gain * v.body, place);
     // Room tail.
-    this.noise(0.22, 'lowpass', 1400, 0.5, 0.1 * gain, pan, 2.5, 0.4);
+    this.noise(0.22, 'lowpass', 1400, 0.5, 0.1 * gain, place, 2.5, 0.4);
   }
 
   dryFire(): void {
@@ -345,11 +487,11 @@ export class AudioEngine {
   }
 
   explosion(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 150);
+    const { gain, place } = this.spatial(at, 150);
     if (gain <= 0.001) return;
-    this.noise(0.5, 'lowpass', 520, 0.6, 0.85 * gain, pan, 3.4, 0.4);
-    this.tone('sine', 120, 28, 0.85, 0.6 * gain, pan, 0, 0.3);
-    this.tone('sawtooth', 220, 40, 0.35, 0.22 * gain, pan);
+    this.noise(0.5, 'lowpass', 520, 0.6, 0.85 * gain, place, 3.4, 0.4);
+    this.tone('sine', 120, 28, 0.85, 0.6 * gain, place, 0, 0.3);
+    this.tone('sawtooth', 220, 40, 0.35, 0.22 * gain, place);
   }
 
   /* -------------------------------------------------------------- enemies */
@@ -378,24 +520,40 @@ export class AudioEngine {
    */
   zombieVoice(at: Vec, kind: ZombieVoice, pitch = 1): void {
     const range = kind === 'scream' ? 80 : kind === 'death' ? 50 : 60;
-    const { gain, pan } = this.spatial(at, range);
+    const { gain, place } = this.spatial(at, range);
     if (!this.ctx || !this.noiseBuffer || !this.shaper || gain <= 0.01) return;
     if (!this.claimVoice(gain)) return;
-    const ctx = this.ctx;
-    const r = (a: number, b: number): number => a + Math.random() * (b - a);
 
     // Per-kind character.
-    const spec = {
-      moan: { dur: r(1.3, 2.3), f0: r(68, 96), rise: 1.12, fall: 0.72, vowels: ['oo', 'ah', 'uh'], breath: 0.35, fry: 0.55, fryHz: r(22, 34), grit: 0.25, level: 0.34, attack: 0.25 },
-      growl: { dur: r(0.7, 1.1), f0: r(52, 72), rise: 1.05, fall: 0.8, vowels: ['uh', 'ah', 'uh'], breath: 0.5, fry: 0.85, fryHz: r(30, 42), grit: 0.8, level: 0.42, attack: 0.08 },
-      snarl: { dur: r(0.35, 0.55), f0: r(120, 170), rise: 1.35, fall: 0.7, vowels: ['aa', 'eh', 'ah'], breath: 0.6, fry: 0.6, fryHz: r(38, 55), grit: 1, level: 0.5, attack: 0.02 },
-      scream: { dur: r(0.7, 1.0), f0: r(260, 380), rise: 1.25, fall: 0.6, vowels: ['aa', 'eh', 'aa'], breath: 0.7, fry: 0.3, fryHz: r(40, 60), grit: 0.7, level: 0.42, attack: 0.03 },
-      death: { dur: r(0.8, 1.3), f0: r(70, 95), rise: 1.0, fall: 0.45, vowels: ['uh', 'oh', 'oo'], breath: 0.55, fry: 1, fryHz: r(10, 18), grit: 0.5, level: 0.4, attack: 0.03 },
+    const spec: Throat = {
+      moan: { dur: rand(1.3, 2.3), f0: rand(68, 96), rise: 1.12, fall: 0.72, vowels: ['oo', 'ah', 'uh'], breath: 0.35, fry: 0.55, fryHz: rand(22, 34), grit: 0.25, level: 0.34, attack: 0.25, swell: true },
+      growl: { dur: rand(0.7, 1.1), f0: rand(52, 72), rise: 1.05, fall: 0.8, vowels: ['uh', 'ah', 'uh'], breath: 0.5, fry: 0.85, fryHz: rand(30, 42), grit: 0.8, level: 0.42, attack: 0.08 },
+      snarl: { dur: rand(0.35, 0.55), f0: rand(120, 170), rise: 1.35, fall: 0.7, vowels: ['aa', 'eh', 'ah'], breath: 0.6, fry: 0.6, fryHz: rand(38, 55), grit: 1, level: 0.5, attack: 0.02 },
+      scream: { dur: rand(0.7, 1.0), f0: rand(260, 380), rise: 1.25, fall: 0.6, vowels: ['aa', 'eh', 'aa'], breath: 0.7, fry: 0.3, fryHz: rand(40, 60), grit: 0.7, level: 0.42, attack: 0.03 },
+      death: { dur: rand(0.8, 1.3), f0: rand(70, 95), rise: 1.0, fall: 0.45, vowels: ['uh', 'oh', 'oo'], breath: 0.55, fry: 1, fryHz: rand(10, 18), grit: 0.5, level: 0.4, attack: 0.03 },
     }[kind];
+    spec.f0 *= pitch;
+
+    const voice = this.throat(spec, 0.9 + pitch * 0.1, gain, place, kind === 'snarl' ? 0.25 : 0.55);
+    if (!voice) return;
+    this.voices.push({ out: voice.out, end: voice.end, loud: gain });
+    if (kind === 'death') {
+      // A wet gurgle underneath as it goes down.
+      this.noise(0.2, 'bandpass', 380, 4, 0.18 * gain, place, 3, 0.3, spec.dur * 0.3, 160);
+    }
+  }
+
+  /**
+   * A voice: a raspy glottal buzz with a vocal-fry rattle, pushed through three
+   * vowel formants that glide as it goes. `formants` scales the vocal tract.
+   */
+  private throat(spec: Throat, formants: number, gain: number, place: Place, reverb: number): { out: GainNode; end: number } | null {
+    if (!this.ctx || !this.noiseBuffer || !this.shaper) return null;
+    const ctx = this.ctx;
     const dur = spec.dur;
     const now = this.t + 0.005;
     const end = now + dur;
-    const f0 = spec.f0 * pitch;
+    const f0 = spec.f0;
 
     // Glottal source: a sawtooth with a sagging pitch contour and a wobble.
     const src = ctx.createOscillator();
@@ -404,9 +562,9 @@ export class AudioEngine {
     src.frequency.linearRampToValueAtTime(f0 * spec.rise, now + dur * 0.3);
     src.frequency.linearRampToValueAtTime(f0 * spec.fall, end);
     const vib = ctx.createOscillator();
-    vib.frequency.value = r(4, 7);
+    vib.frequency.value = rand(4, 7);
     const vibDepth = ctx.createGain();
-    vibDepth.gain.value = f0 * 0.04;
+    vibDepth.gain.value = f0 * (spec.wobble ?? 0.04);
     vib.connect(vibDepth);
     vibDepth.connect(src.frequency);
 
@@ -450,7 +608,7 @@ export class AudioEngine {
       const f = ctx.createBiquadFilter();
       f.type = 'bandpass';
       f.Q.value = [7, 9, 11][i];
-      const vs = spec.vowels.map((v) => VOWELS[v][i] * (0.9 + pitch * 0.1));
+      const vs = spec.vowels.map((v) => VOWELS[v][i] * formants);
       f.frequency.setValueAtTime(vs[0], now);
       f.frequency.linearRampToValueAtTime(vs[1], now + dur * 0.45);
       f.frequency.linearRampToValueAtTime(vs[2], end);
@@ -475,62 +633,89 @@ export class AudioEngine {
     const peak = spec.level * gain;
     env.gain.setValueAtTime(0.0001, now);
     env.gain.exponentialRampToValueAtTime(peak, now + spec.attack);
-    if (kind === 'moan') {
+    if (spec.swell) {
       env.gain.linearRampToValueAtTime(peak * 0.7, now + dur * 0.45);
       env.gain.linearRampToValueAtTime(peak * 0.95, now + dur * 0.7);
     }
     env.gain.exponentialRampToValueAtTime(0.0006, end);
     mix.connect(env);
 
-    const out = this.route(env, 1, pan, kind === 'snarl' ? 0.25 : 0.55);
-    if (!out) return;
-    this.voices.push({ out, end, loud: gain });
+    const out = this.route(env, 1, place, reverb);
+    if (!out) return null;
 
     for (const n of [src, vib, breath, fryOsc]) {
       n.start(now);
       n.stop(end + 0.05);
     }
-    if (kind === 'death') {
-      // A wet gurgle underneath as it goes down.
-      this.noise(0.2, 'bandpass', 380, 4, 0.18 * gain, pan, 3, 0.3, dur * 0.3, 160);
-    }
+    return { out, end };
   }
 
   bark(at: Vec): void {
-    const { gain, pan } = this.spatial(at, 60);
+    const { gain, place } = this.spatial(at, 60);
     if (gain <= 0.01) return;
-    this.tone('sawtooth', 420, 110, 0.16, 0.24 * gain, pan, 0, 0.3);
-    this.noise(0.12, 'bandpass', 900, 1.1, 0.2 * gain, pan, 2, 0.3);
+    this.tone('sawtooth', 420, 110, 0.16, 0.24 * gain, place, 0, 0.3);
+    this.noise(0.12, 'bandpass', 900, 1.1, 0.2 * gain, place, 2, 0.3);
     this.zombieVoice(at, 'growl', 1.6);
   }
 
   flesh(at: Vec, big = false): void {
-    const { gain, pan } = this.spatial(at, 60);
+    const { gain, place } = this.spatial(at, 60);
     if (gain <= 0.01) return;
-    this.noise(big ? 0.2 : 0.08, 'lowpass', big ? 700 : 1300, 0.7, (big ? 0.5 : 0.28) * gain, pan, 2.4);
-    this.tone('sine', big ? 150 : 260, 60, big ? 0.24 : 0.1, 0.18 * gain, pan);
+    this.noise(big ? 0.2 : 0.08, 'lowpass', big ? 700 : 1300, 0.7, (big ? 0.5 : 0.28) * gain, place, 2.4);
+    this.tone('sine', big ? 150 : 260, 60, big ? 0.24 : 0.1, 0.18 * gain, place);
   }
 
   wallHit(at: Vec): void {
-    const { gain, pan } = this.spatial(at, 60);
+    const { gain, place } = this.spatial(at, 60);
     if (gain <= 0.01) return;
-    this.noise(0.05, 'highpass', 3400, 1.5, 0.22 * gain, pan, 1.8, 0.15);
+    this.noise(0.05, 'highpass', 3400, 1.5, 0.22 * gain, place, 1.8, 0.15);
   }
 
   boardBreak(at: Vec): void {
-    const { gain, pan } = this.spatial(at, 70);
+    const { gain, place } = this.spatial(at, 70);
     if (gain <= 0.01) return;
-    this.noise(0.14, 'bandpass', 1500, 0.8, 0.4 * gain, pan, 2.2, 0.35);
-    this.tone('square', 320, 90, 0.16, 0.14 * gain, pan);
+    this.noise(0.14, 'bandpass', 1500, 0.8, 0.4 * gain, place, 2.2, 0.35);
+    this.tone('square', 320, 90, 0.16, 0.14 * gain, place);
   }
 
   footstep(): void {
     this.noise(0.05, 'lowpass', 420, 0.8, 0.08, (Math.random() - 0.5) * 0.4, 2);
   }
 
-  hurt(): void {
+  /* --------------------------------------------------------------- player */
+
+  /**
+   * Taking a hit: the thump of it, and a grunt that gets rougher the harder the
+   * hit and the closer to dead you are. At no health left it is a death cry.
+   * Grunts are spaced out so a crowd clawing at you doesn't turn into a stutter.
+   */
+  hurt(amount = 30, health = 1): void {
     this.tone('sawtooth', 190, 70, 0.3, 0.3, 0);
     this.noise(0.18, 'lowpass', 900, 0.7, 0.22, 0, 2.4);
+    if (health <= 0) {
+      this.grunt('death');
+      return;
+    }
+    const now = this.t;
+    if (now - this.lastGrunt < (amount >= 45 ? 0.25 : amount >= 20 ? 0.45 : 0.9)) return;
+    this.lastGrunt = now;
+    const tier = (amount >= 45 ? 2 : amount >= 20 ? 1 : 0) + (health < 0.3 ? 1 : 0);
+    this.grunt((['light', 'hard', 'agony', 'agony'] as const)[tier]);
+  }
+
+  /** The player's own voice: the zombie throat, tuned to a living man. */
+  grunt(kind: Grunt): void {
+    const spec: Throat = {
+      light: { dur: rand(0.16, 0.24), f0: rand(118, 138), rise: 1.14, fall: 0.8, vowels: ['uh', 'uh', 'oh'], breath: 0.3, fry: 0.25, fryHz: rand(55, 75), grit: 0.15, level: 0.44, attack: 0.012, wobble: 0.015 },
+      hard: { dur: rand(0.26, 0.36), f0: rand(128, 150), rise: 1.22, fall: 0.72, vowels: ['ah', 'ah', 'uh'], breath: 0.35, fry: 0.3, fryHz: rand(60, 80), grit: 0.3, level: 0.5, attack: 0.01, wobble: 0.02 },
+      agony: { dur: rand(0.45, 0.6), f0: rand(150, 180), rise: 1.28, fall: 0.62, vowels: ['aa', 'ah', 'uh'], breath: 0.45, fry: 0.35, fryHz: rand(65, 85), grit: 0.5, level: 0.52, attack: 0.015, wobble: 0.03 },
+      death: { dur: rand(1.1, 1.4), f0: rand(160, 185), rise: 1.08, fall: 0.42, vowels: ['aa', 'ah', 'oh'], breath: 0.5, fry: 0.55, fryHz: rand(30, 45), grit: 0.45, level: 0.5, attack: 0.02, wobble: 0.04 },
+    }[kind];
+    this.throat(spec, 1, 1, 0, kind === 'death' ? 0.35 : 0.12);
+    // The breath forced out after it.
+    if (kind !== 'light') {
+      this.noise(kind === 'death' ? 0.3 : 0.1, 'bandpass', 1300, 0.9, kind === 'death' ? 0.07 : 0.05, 0, 2, 0.1, spec.dur * 0.92);
+    }
   }
 
   /* ----------------------------------------------------------- interface */
@@ -545,13 +730,134 @@ export class AudioEngine {
   }
 
   doorOpen(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 90);
-    this.noise(0.7, 'lowpass', 300, 0.7, 0.4 * gain, pan, 3, 0.4);
-    this.tone('sawtooth', 70, 40, 0.8, 0.2 * gain, pan);
+    const { gain, place } = this.spatial(at, 90);
+    this.noise(0.7, 'lowpass', 300, 0.7, 0.4 * gain, place, 3, 0.4);
+    this.tone('sawtooth', 70, 40, 0.8, 0.2 * gain, place);
   }
 
   powerUp(): void {
     this.arpeggio([392, 523, 659, 784, 1047, 1319], 0.06, 0.14, 'triangle');
+  }
+
+  /**
+   * The announcer, as in the old games: a low boom, the music ducking out of
+   * the way, and a huge slow voice calling it. The recorded line is played
+   * slowed down, doubled by a second copy a hair slower still (so the two
+   * drift and phase against each other), warmed through the grit curve and
+   * sent heavily into the room. Before the lines have downloaded, only the
+   * boom plays; the banner still says it.
+   */
+  announce(line: AnnouncerLine, delay = 0): void {
+    if (!this.ctx || !this.shaper) return;
+    const ctx = this.ctx;
+    const at = this.t + delay;
+    this.tone('sine', 96, 42, 1.2, 0.24, 0, delay, 0.5);
+    this.noise(0.5, 'lowpass', 420, 0.7, 0.14, 0, 3, 0.6, delay, 160);
+    const buf = this.bank.pick('announcer', line);
+    const length = buf ? buf.duration / ANNOUNCER_RATE : 0.8;
+    this.duck(length + 0.5, at);
+    if (!buf) return;
+
+    const main = ctx.createBufferSource();
+    main.buffer = buf;
+    main.playbackRate.value = ANNOUNCER_RATE;
+    const double = ctx.createBufferSource();
+    double.buffer = buf;
+    double.playbackRate.value = ANNOUNCER_RATE * 0.992;
+    const doubleGain = ctx.createGain();
+    doubleGain.gain.value = 0.5;
+    double.connect(doubleGain);
+
+    const drive = ctx.createGain();
+    drive.gain.value = 0.35;
+    main.connect(drive);
+    doubleGain.connect(drive);
+    const grit = ctx.createWaveShaper();
+    grit.curve = this.shaper as Float32Array<ArrayBuffer>;
+    drive.connect(grit);
+    const chest = ctx.createBiquadFilter();
+    chest.type = 'lowshelf';
+    chest.frequency.value = 200;
+    chest.gain.value = 5;
+    grit.connect(chest);
+    const rumble = ctx.createBiquadFilter();
+    rumble.type = 'highpass';
+    rumble.frequency.value = 65;
+    chest.connect(rumble);
+
+    const out = this.route(rumble, 0.95, 0, 0.6);
+    if (!out) return;
+    main.start(at);
+    double.start(at + 0.02);
+    // He talks over everyone, including himself calling the last pick-up.
+    this.hush(this.mouth, at);
+    this.hush(this.announcer, at);
+    this.announcer = { out, end: at + length + 0.15 };
+    this.lastLine = `announcer.${line}`;
+  }
+
+  /**
+   * The player says something about what just happened - if the moment earns a
+   * line (see CALLOUT_PACE), the same line has not just been said, and nobody
+   * is already talking. Returns whether a line was spoken.
+   */
+  callout(line: PlayerLine, delay = 0): boolean {
+    if (!this.ctx) return false;
+    const ctx = this.ctx;
+    const now = this.t;
+    const at = now + delay;
+    const pace = CALLOUT_PACE[line];
+    if (this.announcer && at < this.announcer.end) return false;
+    if (!pace.urgent && this.mouth && at < this.mouth.end + CALLOUT_GAP) return false;
+    if (now < (this.calloutReady.get(line) ?? 0)) return false;
+    if (Math.random() >= pace.chance) return false;
+    const buf = this.bank.pick('player', line);
+    if (!buf) return false;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    // Nobody says a line the same way twice: a hair up or down each time.
+    src.playbackRate.value = rand(0.97, 1.03);
+    const clean = ctx.createBiquadFilter();
+    clean.type = 'highpass';
+    clean.frequency.value = 90;
+    src.connect(clean);
+    const out = this.route(clean, 0.7, 0, 0.1);
+    if (!out) return false;
+    this.hush(this.mouth, at);
+    src.start(at);
+    this.mouth = { out, end: at + buf.duration / src.playbackRate.value };
+    this.calloutReady.set(line, now + pace.cooldown);
+    this.lastLine = `player.${line}`;
+    return true;
+  }
+
+  /** Cuts a line off, from a moment in time. */
+  private hush(speech: Speech | null, at: number): void {
+    if (!speech || speech.end <= at) return;
+    const g = speech.out.gain;
+    g.setValueAtTime(g.value, at);
+    g.setTargetAtTime(0, at, 0.04);
+    speech.end = at;
+  }
+
+  /** Resolves once the spoken lines have downloaded (or failed to). */
+  get voicesReady(): Promise<number> {
+    return this.voicesLoading.then(() => this.bank.loaded);
+  }
+
+  /** Pulls the music down out of the way for a moment. */
+  private duck(seconds: number, at = this.t): void {
+    if (!this.musicBus) return;
+    const g = this.musicBus.gain;
+    if (typeof g.cancelAndHoldAtTime === 'function') {
+      g.cancelAndHoldAtTime(at);
+    } else {
+      g.cancelScheduledValues(at);
+      g.setValueAtTime(g.value, at);
+    }
+    g.setTargetAtTime(this.musicLevel * 0.3, at, 0.06);
+    g.setTargetAtTime(this.musicLevel, at + seconds, 0.5);
   }
 
   perkJingle(): void {
@@ -625,25 +931,25 @@ export class AudioEngine {
 
   /** Lightning: a crackle of short bursts over a falling whine. */
   zap(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 90);
+    const { gain, place } = this.spatial(at, 90);
     if (gain <= 0.01) return;
-    for (let i = 0; i < 5; i++) this.noise(0.02, 'highpass', 2600 + Math.random() * 3000, 1.2, 0.26 * gain, pan, 1.4, 0.3, Math.random() * 0.18);
-    this.tone('sawtooth', 1600, 180, 0.28, 0.09 * gain, pan, 0, 0.3);
+    for (let i = 0; i < 5; i++) this.noise(0.02, 'highpass', 2600 + Math.random() * 3000, 1.2, 0.26 * gain, place, 1.4, 0.3, Math.random() * 0.18);
+    this.tone('sawtooth', 1600, 180, 0.28, 0.09 * gain, place, 0, 0.3);
   }
 
   freeze(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 80);
+    const { gain, place } = this.spatial(at, 80);
     if (gain <= 0.01) return;
-    this.noise(0.3, 'highpass', 5200, 0.8, 0.25 * gain, pan, 2.5, 0.4);
-    this.tone('sine', 2600, 1300, 0.45, 0.06 * gain, pan, 0, 0.4);
-    for (let i = 0; i < 4; i++) this.noise(0.015, 'bandpass', 6000, 3, 0.2 * gain, pan, 1.2, 0.3, 0.05 + Math.random() * 0.3);
+    this.noise(0.3, 'highpass', 5200, 0.8, 0.25 * gain, place, 2.5, 0.4);
+    this.tone('sine', 2600, 1300, 0.45, 0.06 * gain, place, 0, 0.4);
+    for (let i = 0; i < 4; i++) this.noise(0.015, 'bandpass', 6000, 3, 0.2 * gain, place, 1.2, 0.3, 0.05 + Math.random() * 0.3);
   }
 
   fireBurst(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 80);
+    const { gain, place } = this.spatial(at, 80);
     if (gain <= 0.01) return;
-    this.noise(0.4, 'lowpass', 900, 0.7, 0.4 * gain, pan, 2.6, 0.3, 0, 300);
-    this.tone('sine', 110, 50, 0.3, 0.2 * gain, pan);
+    this.noise(0.4, 'lowpass', 900, 0.7, 0.4 * gain, place, 2.6, 0.3, 0, 300);
+    this.tone('sine', 110, 50, 0.3, 0.2 * gain, place);
   }
 
   /** One tick of a flamethrower; at fifteen a second it becomes a roar. */
@@ -656,18 +962,47 @@ export class AudioEngine {
     const where = at ?? this.listener;
     this.zombieVoice(where, 'growl', pitch);
     this.zombieVoice(where, 'moan', pitch * 0.8);
-    const { gain, pan } = this.spatial(at, 200);
-    this.tone('sine', 70, 38, 1.6, 0.35 * Math.max(0.3, gain), pan, 0, 0.5);
-    this.noise(1.2, 'lowpass', 300, 0.7, 0.2 * Math.max(0.3, gain), pan, 3, 0.5);
+    const { gain, place } = this.spatial(at, 200);
+    this.tone('sine', 70, 38, 1.6, 0.35 * Math.max(0.3, gain), place, 0, 0.5);
+    this.noise(1.2, 'lowpass', 300, 0.7, 0.2 * Math.max(0.3, gain), place, 3, 0.5);
   }
 
   /** A boss hitting the floor. */
   slam(at?: Vec): void {
-    const { gain, pan } = this.spatial(at, 120);
+    const { gain, place } = this.spatial(at, 120);
     if (gain <= 0.01) return;
-    this.noise(0.35, 'lowpass', 400, 0.8, 0.8 * gain, pan, 3, 0.4);
-    this.tone('sine', 90, 26, 0.7, 0.6 * gain, pan, 0, 0.3);
-    this.noise(0.15, 'bandpass', 1400, 1, 0.25 * gain, pan, 2, 0.3, 0.02);
+    this.noise(0.35, 'lowpass', 400, 0.8, 0.8 * gain, place, 3, 0.4);
+    this.tone('sine', 90, 26, 0.7, 0.6 * gain, place, 0, 0.3);
+    this.noise(0.15, 'bandpass', 1400, 1, 0.25 * gain, place, 2, 0.3, 0.02);
+  }
+
+  /** A valve wheel spun open: a squeal of metal, a clunk and a rush of steam. */
+  valve(at?: Vec): void {
+    const { gain, place } = this.spatial(at, 70);
+    if (gain <= 0.01) return;
+    this.tone('sawtooth', 380, 520, 0.35, 0.05 * gain, place, 0, 0.3);
+    this.noise(0.06, 'lowpass', 900, 1, 0.4 * gain, place, 2, 0.3, 0.3);
+    this.tone('square', 140, 80, 0.1, 0.14 * gain, place, 0.3);
+    this.noise(0.9, 'highpass', 2600, 0.6, 0.16 * gain, place, 2.6, 0.4, 0.35, 5200);
+  }
+
+  /** Pressure gone: every valve slamming shut at once, and the steam dying away. */
+  steam(): void {
+    for (let i = 0; i < 3; i++) this.noise(0.06, 'lowpass', 700, 1, 0.3, (i - 1) * 0.5, 2, 0.4, i * 0.12);
+    this.noise(1.1, 'highpass', 3000, 0.6, 0.14, 0, 3, 0.4, 0.1, 900);
+  }
+
+  /** A soul flying into the station: a whoosh that rises as it goes. */
+  soul(at?: Vec): void {
+    const { gain, place } = this.spatial(at, 70);
+    if (gain <= 0.01) return;
+    this.noise(0.35, 'bandpass', 500, 2.5, 0.16 * gain, place, 2, 0.4, 0, 2400);
+    this.tone('sine', 300, 900, 0.4, 0.05 * gain, place, 0.05, 0.4);
+  }
+
+  /** One second of the valve clock running out; the last few are sharper. */
+  countdown(urgent: boolean): void {
+    this.tone('square', urgent ? 1320 : 990, urgent ? 1320 : 990, 0.07, urgent ? 0.1 : 0.07, 0);
   }
 
   /** Radio traffic: a squelch, two pips and a hiss of static. */
@@ -696,55 +1031,34 @@ export class AudioEngine {
     });
   }
 
-  /* -------------------------------------------------------------- ambient */
+  /* ---------------------------------------------------------------- music */
 
+  /** Starts the soundtrack in its between-rounds breakdown. */
   startMusic(): void {
-    if (!this.ctx || !this.musicBus || this.musicNodes.length) return;
-    // Two detuned drones a fifth apart: the classic "something is wrong" pad.
-    for (const [freq, detune, gainValue] of [
-      [55, -6, 0.16], [82.4, 5, 0.1], [110, 11, 0.06],
-    ]) {
-      const osc = this.ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      osc.detune.value = detune;
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = 320;
-      filter.Q.value = 2;
-      const g = this.ctx.createGain();
-      g.gain.value = gainValue;
-      osc.connect(filter);
-      filter.connect(g);
-      g.connect(this.musicBus);
-      osc.start();
-      this.musicNodes.push(osc);
-    }
+    if (!this.ctx || !this.musicBus || !this.noiseBuffer) return;
+    this.music ??= new ArcadeMusic(this.ctx, this.musicBus, this.noiseBuffer);
+    this.music.start();
   }
 
   stopMusic(): void {
-    for (const n of this.musicNodes) {
-      try {
-        n.stop();
-      } catch {
-        /* already stopped */
-      }
-    }
-    this.musicNodes = [];
+    this.music?.stop();
   }
 
-  /** Drives the sparse heartbeat pulse; intensity rises with the round. */
+  /** Between rounds, or into the fight. The music changes at its next bar line. */
+  musicCue(cue: MusicCue): void {
+    this.music?.cue(cue);
+  }
+
+  /** Keeps the soundtrack scheduled; intensity (0..1) sets its tempo and drive. */
   updateMusic(dt: number, intensity: number): void {
-    if (!this.ctx || !this.musicBus) return;
+    if (!this.music) return;
     this.musicIntensity += (intensity - this.musicIntensity) * Math.min(1, dt * 0.5);
-    this.musicTimer -= dt;
-    if (this.musicTimer > 0) return;
-    const period = Math.max(0.42, 1.5 - this.musicIntensity * 0.9);
-    this.musicTimer = period;
-    this.tone('sine', 62, 38, 0.24, 0.1 + this.musicIntensity * 0.1, 0);
-    if (this.musicIntensity > 0.45) {
-      this.tone('sine', 62, 38, 0.18, 0.06 + this.musicIntensity * 0.06, 0, period * 0.34);
-    }
+    this.music.update(this.musicIntensity);
+  }
+
+  /** Where the soundtrack is. Used by the smoke test. */
+  get musicPosition(): { section: string; bar: number; bpm: number; level: number } | null {
+    return this.music?.playing ? this.music.position : null;
   }
 
   /** How many zombie voices are sounding right now. Used by the smoke test. */

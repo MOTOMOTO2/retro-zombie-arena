@@ -230,22 +230,38 @@ export class Hud {
     );
   }
 
-  /** The objective list; lines that are new since last time flash in. */
-  setObjectives(list: { text: string; done: boolean }[]): void {
+  /**
+   * The objective list; lines that are new since last time flash in. A
+   * line's `progress` (a count, a clock) updates in place without a flash,
+   * and `alert` turns it red.
+   */
+  setObjectives(list: { text: string; done: boolean; progress?: string; alert?: boolean }[]): void {
     const key = list.map((o) => `${o.text}|${o.done}`).join(';');
-    if (key === this.shownObjectives) return;
-    const before = new Set(this.shownObjectives.split(';'));
-    this.shownObjectives = key;
-    this.objectiveEl.classList.toggle('hidden', list.length === 0);
-    this.objectiveList.replaceChildren(
-      ...list.map((o) => {
-        const li = document.createElement('li');
-        li.textContent = o.text;
-        li.classList.toggle('done', o.done);
-        if (!before.has(`${o.text}|${o.done}`)) li.classList.add('new');
-        return li;
-      }),
-    );
+    if (key !== this.shownObjectives) {
+      const before = new Set(this.shownObjectives.split(';'));
+      this.shownObjectives = key;
+      this.objectiveEl.classList.toggle('hidden', list.length === 0);
+      this.objectiveList.replaceChildren(
+        ...list.map((o) => {
+          const li = document.createElement('li');
+          li.textContent = o.text;
+          const prog = document.createElement('span');
+          prog.className = 'prog';
+          li.append(prog);
+          li.classList.toggle('done', o.done);
+          if (!before.has(`${o.text}|${o.done}`)) li.classList.add('new');
+          return li;
+        }),
+      );
+    }
+    list.forEach((o, i) => {
+      const li = this.objectiveList.children[i];
+      const prog = li?.lastElementChild;
+      if (!li || !prog) return;
+      const text = o.progress ? `  ${o.progress}` : '';
+      if (prog.textContent !== text) prog.textContent = text;
+      li.classList.toggle('alert', Boolean(o.alert));
+    });
   }
 
   /** A line of radio chatter. Lines that arrive while one is playing wait their turn. */

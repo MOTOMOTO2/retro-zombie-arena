@@ -82,7 +82,7 @@ import {
 import { BoxController, type BoxUnit } from './box.ts';
 import { BossEnemy, bossHealth, type BossHooks, type BossMove } from './boss.ts';
 import { BOSS_DELAY, Quest } from './quest.ts';
-import { RADIO_NAME, type BossId, type StoryBeat } from './story.ts';
+import { RADIO_NAME, STATION_RADIUS, type BossId, type StoryBeat } from './story.ts';
 import {
   buildQuestProps,
   disposeQuestProps,
@@ -90,6 +90,7 @@ import {
   type QuestProps,
 } from '../world/questprops.ts';
 import { ElementFX, FIRE_COLORS, ICE_COLORS, SPARK_BLUE } from './elements.ts';
+import { EnemyTags } from './tags.ts';
 
 /** Hex colour as a CSS string. */
 function css(hex: number): string {
@@ -133,6 +134,8 @@ type Hazard = {
 
 const SHOT_GRAVITY = 26;
 const PART_SPARK = new THREE.Color(0.5, 2.4, 1.9);
+/** What flies out of a zombie killed inside the ring of a hungry station. */
+const SOUL_COLOR = new THREE.Color(2.6, 0.7, 0.25);
 const ACID_COLOR = new THREE.Color(0.5, 1.8, 0.4);
 /** How deep each boss roars. */
 const BOSS_PITCH: Record<BossId, number> = { warden: 0.5, butcher: 0.42, furnace: 0.36, patient0: 0.62 };
@@ -207,6 +210,8 @@ export class Game {
   /** True while the world built at boot has not been played yet. */
   private worldFresh = false;
   private readonly pool = new EnemyPool();
+  /** Health bars and damage numbers over the horde. */
+  readonly tags: EnemyTags;
   private readonly particles = new ParticleField(1200, 0.2);
   private readonly rng = new Rng(Date.now() >>> 0);
   private readonly torch: THREE.PointLight;
@@ -284,6 +289,9 @@ export class Game {
     });
     this.scene.add(this.elements.group);
     this.scene.add(this.pool.group);
+    const tagRoot = document.getElementById('tags');
+    if (!tagRoot) throw new Error('missing HUD element #tags');
+    this.tags = new EnemyTags(tagRoot, this.pool.all);
     this.scene.add(this.particles.points);
 
     // A dim lantern glow around the player, just enough to read a face at arm's length.
@@ -404,7 +412,14 @@ export class Game {
     this.scene.add(this.level.group);
     this.props = buildProps(this.layout, this.level.probe);
     for (const g of propGroups(this.props)) this.scene.add(g);
-    this.questProps = buildQuestProps(this.layout.parts, this.layout.workbench, this.layout.exit, this.level.probe);
+    // The chapter decides how many parts and valves go out into the map.
+    const needs = new Quest(map);
+    this.questProps = buildQuestProps(this.layout.parts, this.layout.spots, this.layout.workbench, this.layout.exit, {
+      parts: needs.parts.length,
+      valves: needs.valves.length,
+      radius: STATION_RADIUS,
+      seen: (x0, z0, x1, z1) => this.grid.lineOfSight(x0, z0, x1, z1),
+    }, this.level.probe);
     for (const g of questGroups(this.questProps)) this.scene.add(g);
     this.boxes.reset(this.layout.boxPads, this.boxCount);
     const look = lookAt(this.layout, this.layout.spawnZone);
@@ -474,6 +489,7 @@ export class Game {
     this.player.pitch = 0;
 
     this.pool.reset();
+    this.tags.clear();
     this.clearBossEffects();
     this.quest = new Quest(this.layout.map);
     this.syncQuestProps();
@@ -571,7 +587,7 @@ export class Game {
 
   private startRound(n: number): void {
     this.round = n;
-    this.plan = planRound(n);
+    this.plan = planRound(n, this.quest.threat);
     this.spawned = 0;
     this.killedThisRound = 0;
     this.dropsThisRound = 0;
@@ -579,11 +595,14 @@ export class Game {
     this.roundPhase = 'active';
     this.hud.setRound(n);
     audio.roundStart(n);
+    audio.musicCue('fight');
     if (this.plan.isHoundRound) {
+      audio.announce('hounds', 0.6);
       this.hud.banner('HELLHOUNDS', 2.6, '#ff6a2a');
       this.hud.toast('THEY COME IN PACKS', '#ff6a2a', 2.6);
     } else {
       this.hud.banner(`ROUND ${n}`, 2.0);
+      audio.callout('roundStart', 1.5);
     }
   }
 
@@ -596,6 +615,8 @@ export class Game {
     this.hud.pointsDelta(bonus);
     this.hud.toast(`ROUND ${this.round} CLEARED  +${bonus}`, '#7bd14a', 2.6);
     audio.roundEnd();
+    audio.musicCue('calm');
+    audio.callout('roundClear', 1.2);
     if (this.plan.isHoundRound) this.applyPowerUp('maxammo', false);
   }
 
@@ -621,7 +642,8 @@ export class Game {
   }
 
   private trySpawn(): void {
-    if (this.spawned >= this.plan.total) return;
+    // Defending the station, they keep coming past the round's count.
+    if (this.spawned >= this.plan.total && !this.quest.defending) return;
     // A boss fight thins the horde out so the fight is about the boss.
     const cap = this.bossAlive ? Math.ceil(this.plan.maxAlive * 0.4) + 1 : this.plan.maxAlive;
     if (this.pool.liveCount >= cap) return;
@@ -635,7 +657,7 @@ export class Game {
       x: barricade.center.x + barricade.def.dx * TILE * 2.0,
       z: barricade.center.z + barricade.def.dz * TILE * 2.0,
     };
-    enemy.spawn(kind, outside.x, outside.z, this.plan.health, this.round, barricade, this.rng);
+    enemy.spawn(kind, outside.x, outside.z, this.plan.health, this.round, barricade, this.rng, this.quest.threat);
     this.spawned++;
   }
 
@@ -663,6 +685,7 @@ export class Game {
     if (this.input.consume('grenade') && p.hasGrenades && p.tryGrenade()) {
       this.viewmodel.setPose('throw', 0.7);
       this.throwGrenade();
+      audio.callout('grenade', 0.1);
       this.hud.setGrenades(p.grenades, p.hasGrenades);
     }
 
@@ -688,6 +711,7 @@ export class Game {
     const empty = p.slot.mag === 0;
     if (!p.tryReload()) return false;
     this.viewmodel.setPose('reload', p.reloadRemaining, { empty });
+    audio.callout('reload');
     return true;
   }
 
@@ -704,6 +728,7 @@ export class Game {
     if (outcome.kind === 'dry') {
       audio.dryFire();
       if (this.player.slot.reserve > 0) this.startReload();
+      else audio.callout('empty', 0.15);
       return;
     }
     if (outcome.kind !== 'shoot') return;
@@ -1084,6 +1109,7 @@ export class Game {
     }
     this.placeDecal(x, 0.05, z, 0, 0, false, radius * 0.7);
 
+    const killsBefore = this.player.kills;
     this.pool.forEachLive((e) => {
       const d = Math.hypot(e.x - x, e.z - z);
       if (d > radius) return;
@@ -1094,6 +1120,7 @@ export class Game {
         new THREE.Vector3(e.x, e.headY, e.z), { x, z },
       );
     });
+    if (this.player.kills - killsBefore >= 3) audio.callout('multikill', 0.35);
 
     // Explosives hurt the player too - the ray gun especially.
     const pd = Math.hypot(this.player.x - x, this.player.z - z);
@@ -1122,6 +1149,7 @@ export class Game {
     dirZ /= len;
     const res = e.applyDamage(amount, head, explosive, dirX, dirZ);
     if (res.damageDealt <= 0) return;
+    this.tags.hit(e, res.damageDealt, opts.quiet ? 'burn' : head ? 'head' : 'body', res.killed, at);
 
     const doublePoints = this.activePowerups.has('doublepoints');
     if (res.shattered) {
@@ -1174,12 +1202,35 @@ export class Game {
     this.player.award(award);
     this.player.kills++;
     if (head) this.player.headshots++;
+    if (head && !explosive && !e.isBoss) audio.callout('headshot', 0.3);
     this.killedThisRound++;
     this.hud.pointsDelta(award);
     this.hud.hitmarker(true);
     this.hud.setPoints(this.player.points);
     if (e.isBoss) this.onBossKilled(e);
-    else this.maybeDropPowerUp(e.x, e.z);
+    else {
+      this.maybeDropPowerUp(e.x, e.z);
+      this.feedStation(e);
+    }
+  }
+
+  /** A kill inside the ring while the station is hungry: its soul flies in. */
+  private feedStation(e: Enemy): void {
+    if (!this.quest.harvesting) return;
+    const c = this.questProps.bench.center;
+    if (Math.hypot(e.x - c.x, e.z - c.z) > STATION_RADIUS || !this.grid.lineOfSight(c.x, c.z, e.x, e.z)) return;
+    // Straight at the station with no gravity, arriving just as they fade.
+    const y = e.y + 2.2;
+    for (let i = 0; i < 9; i++) {
+      const life = this.rng.range(0.55, 0.8);
+      this.particles.spawn(
+        e.x + this.rng.range(-0.5, 0.5), y + this.rng.range(-0.6, 0.6), e.z + this.rng.range(-0.5, 0.5),
+        (c.x - e.x) / life, (c.y + 0.8 - y) / life, (c.z - e.z) / life,
+        SOUL_COLOR, life, 0,
+      );
+    }
+    audio.soul({ x: e.x, z: e.z });
+    this.beats(this.quest.harvest());
   }
 
   private hurtPlayer(amount: number): void {
@@ -1188,7 +1239,8 @@ export class Game {
     this.damageFlash = Math.min(1, this.damageFlash + amount / 70);
     this.hud.damageFlash();
     this.hud.setHealth(this.player.healthFraction);
-    audio.hurt();
+    audio.hurt(amount, this.player.healthFraction);
+    if (!died && this.player.healthFraction < 0.35) audio.callout('hurt', 0.45);
     this.shake = Math.max(this.shake, 1.4);
     if (died) this.die();
   }
@@ -1196,6 +1248,7 @@ export class Game {
   private die(): void {
     audio.gameOver();
     audio.stopMusic();
+    audio.announce('gameover', 1.5);
     this.hud.banner('YOU DIED', 3, '#d22f26');
     this.setState('gameover');
     this.input.exitLock();
@@ -1248,6 +1301,7 @@ export class Game {
     const info = POWERUPS[id];
     if (announce) {
       audio.powerUp();
+      audio.announce(id);
       this.hud.toast(info.name, `#${info.color.toString(16).padStart(6, '0')}`, 2.2);
     }
     switch (id) {
@@ -1261,6 +1315,7 @@ export class Game {
         for (const e of killed) {
           this.player.kills++;
           this.killedThisRound++;
+          this.feedStation(e);
           for (let i = 0; i < 10; i++) {
             this.particles.spawn(
               e.x, e.headY, e.z,
@@ -1318,14 +1373,64 @@ export class Game {
         case 'parts':
           audio.pickup();
           audio.objective();
-          this.hud.toast('ALL PARTS FOUND', '#7affd0', 2.4);
+          this.hud.toast(this.quest.parts.length === 1 ? `${this.quest.partNames[0]} FOUND` : 'ALL PARTS FOUND', '#7affd0', 2.4);
           this.say('parts');
           break;
         case 'built':
           audio.objective();
+          audio.callout('objective', 0.8);
           this.hud.banner(`${c.device} BUILT`, 2.6, '#7affd0');
           this.retro.setTint(0x7affd0, 0.35);
           this.say('built');
+          break;
+        case 'valve': {
+          audio.objective();
+          const name = this.quest.step('valves')?.name ?? 'VALVE';
+          this.hud.toast(`${name} OPEN  ${this.quest.valvesOpen}/${this.quest.valves.length}  ·  MOVE!`, '#ffc84d', 2.2);
+          this.say('valve', this.quest.valvesOpen - 1);
+          break;
+        }
+        case 'valves':
+          audio.objective();
+          audio.callout('objective', 0.8);
+          this.hud.banner(`${this.quest.step('valves')?.name ?? 'VALVE'}S OPEN`, 2.6, '#7affd0');
+          this.retro.setTint(0x7affd0, 0.35);
+          this.say('valves', 0, 0.8);
+          break;
+        case 'valvesLost':
+          audio.deny();
+          audio.steam();
+          audio.callout('setback', 0.3);
+          this.hud.banner('PRESSURE LOST', 2.4, '#d22f26');
+          this.hud.toast('THEY ALL SHUT AGAIN  ·  OPEN THEM FASTER', '#d22f26', 2.6);
+          this.say('valvesLost');
+          break;
+        case 'harvest':
+          this.hud.toast(`${this.quest.step('harvest')?.text ?? 'FEED IT'}  ·  KILL THEM INSIDE THE RING`, '#ff6a4a', 3);
+          break;
+        case 'harvestHalf':
+          this.say('harvestHalf');
+          break;
+        case 'harvested':
+          audio.objective();
+          audio.callout('objective', 0.6);
+          this.hud.banner(`THE ${c.device} IS READY`, 2.6, '#7affd0');
+          this.retro.setTint(0xff6a4a, 0.35);
+          this.say('harvested', 0, 0.6);
+          break;
+        case 'defend':
+          audio.callout('defend', 1.2);
+          this.hud.toast(`DEFEND THE ${c.device}  ·  STAY INSIDE THE RING`, '#ffc84d', 3);
+          break;
+        case 'defendHalf':
+          this.say('defendHalf');
+          break;
+        case 'defended':
+          audio.objective();
+          audio.callout('objective', 0.6);
+          this.hud.banner(`${c.device} COMPLETE`, 2.6, '#7affd0');
+          this.retro.setTint(0x7affd0, 0.35);
+          this.say('defended', 0, 0.6);
           break;
         case 'boss':
           audio.bossRoar(undefined, BOSS_PITCH[c.boss]);
@@ -1367,7 +1472,8 @@ export class Game {
     const q = this.quest;
     const qp = this.questProps;
     qp.parts.forEach((p, i) => p.setTaken(q.parts[i]));
-    qp.bench.setBuilt(q.built);
+    qp.valves.forEach((v, i) => v.set(q.valves[i], q.canOpenValves));
+    qp.bench.setBuilt(q.deviceOn);
     qp.bench.setParts(q.parts);
     qp.bench.setReady(q.canBuild);
     qp.exit.setOpen(q.boss === 'dead');
@@ -1381,6 +1487,22 @@ export class Game {
       this.particles.spawn(part.center.x, part.center.y + 0.6, part.center.z,
         this.rng.range(-3, 3), this.rng.range(1, 6), this.rng.range(-3, 3),
         PART_SPARK, this.rng.range(0.3, 0.8), 6);
+    }
+    this.beats(beats);
+  }
+
+  private openValve(i: number): void {
+    const valve = this.questProps.valves[i];
+    const beats = this.quest.openValve(i);
+    if (!beats.length) {
+      audio.deny();
+      return;
+    }
+    audio.valve({ x: valve.center.x, z: valve.center.z });
+    for (let k = 0; k < 24; k++) {
+      this.particles.spawn(valve.center.x, valve.center.y + 0.4, valve.center.z,
+        this.rng.range(-2, 2), this.rng.range(3, 8), this.rng.range(-2, 2),
+        DUST_COLOR, this.rng.range(0.5, 1.2), -2);
     }
     this.beats(beats);
   }
@@ -1434,9 +1556,26 @@ export class Game {
         audio.radio();
       }
     }
-    // Something is coming: a distant roar halfway through the wait.
+    // The clocks: valve pressure, the defence (only while you are in the ring) and the boss.
+    const station = this.questProps.bench.center;
+    const near = this.player.alive
+      && Math.hypot(this.player.x - station.x, this.player.z - station.z) < STATION_RADIUS
+      && this.grid.lineOfSight(station.x, station.z, this.player.x, this.player.z);
+    const timer = this.quest.valveTimer;
     const before = this.quest.bossTimer;
-    if (this.quest.tick(dt)) this.spawnBoss();
+    const beats = this.quest.tick(dt, near);
+    if (beats.length) this.beats(beats);
+    // The last ten seconds of pressure tick away out loud.
+    if (this.quest.valveTimer > 0 && this.quest.valveTimer < 10 && Math.ceil(this.quest.valveTimer) !== Math.ceil(timer)) {
+      audio.countdown(this.quest.valveTimer < 4);
+    }
+    const q = this.quest;
+    this.questProps.ring.set(q.defending ? 'defend' : q.harvesting ? 'harvest' : null);
+    const d = q.step('defend');
+    const h = q.step('harvest');
+    this.questProps.bench.setCharge(q.defending && d ? q.held / d.seconds : q.harvesting && h ? q.kills / h.kills : 0);
+    if (this.quest.bossDue) this.spawnBoss();
+    // Something is coming: a distant roar halfway through the wait.
     if (this.quest.boss === 'coming' && before > BOSS_DELAY / 2 && this.quest.bossTimer <= BOSS_DELAY / 2) {
       audio.bossRoar(undefined, BOSS_PITCH[this.quest.chapter.boss] * 0.9);
       this.shake = Math.max(this.shake, 1.2);
@@ -1483,6 +1622,7 @@ export class Game {
     this.pool.addBoss(boss);
     boss.begin(x, z, bossHealth(id, Math.max(1, this.round)), win, this.rng, this.bossHooks);
     this.beats(this.quest.bossArrived());
+    audio.callout('boss', 1.8);
   }
 
   /** A window in the open part of the map, a fair way off. */
@@ -1536,6 +1676,7 @@ export class Game {
     this.retro.setTint(0xffffff, 0.35);
     this.bossLight.intensity = 0;
     this.beats(this.quest.bossKilled());
+    audio.callout('bossDown', 1.4);
   }
 
   /** Shoves the player away from a point. */
@@ -1594,7 +1735,7 @@ export class Game {
               break;
             }
           }
-          e.spawn(kind, x, z, health, Math.max(1, this.round), null, this.rng);
+          e.spawn(kind, x, z, health, Math.max(1, this.round), null, this.rng, this.quest.threat);
           for (let k = 0; k < 14; k++) {
             this.particles.spawn(x, 0.5, z, this.rng.range(-3, 3), this.rng.range(2, 7), this.rng.range(-3, 3),
               kind === 'hound' ? EMBER_COLOR : ACID_COLOR, this.rng.range(0.3, 0.7), 12);
@@ -1778,7 +1919,22 @@ export class Game {
         }
         return best ? this.tmpTarget.copy(best) : null;
       }
+      case 'valves': {
+        let best: THREE.Vector3 | null = null;
+        let bestD = Infinity;
+        for (const v of this.questProps.valves) {
+          if (v.open) continue;
+          const d = Math.hypot(v.center.x - this.player.x, v.center.z - this.player.z);
+          if (d < bestD) {
+            bestD = d;
+            best = v.center;
+          }
+        }
+        return best ? this.tmpTarget.copy(best) : null;
+      }
       case 'build':
+      case 'harvest':
+      case 'defend':
         return this.tmpTarget.copy(this.questProps.bench.center);
       case 'boss': {
         const b = this.pool.boss;
@@ -1924,9 +2080,15 @@ export class Game {
     const qp = this.questProps;
     for (const part of qp.parts) {
       if (part.taken) continue;
-      consider(part.center.x, part.center.z, `PICK UP THE ${q.chapter.parts[part.index]}`, 0, () => this.takePart(part.index), 5);
+      consider(part.center.x, part.center.z, `PICK UP THE ${q.partNames[part.index]}`, 0, () => this.takePart(part.index), 5);
     }
-    if (!q.built) {
+    const valveName = q.step('valves')?.name ?? 'VALVE';
+    for (const v of qp.valves) {
+      if (v.open) continue;
+      const label = q.canOpenValves ? `OPEN THE ${valveName}` : `${valveName} — ${q.power ? 'LOCKED' : 'NEEDS POWER'}`;
+      consider(v.center.x, v.center.z, label, 0, () => this.openValve(v.index), 5);
+    }
+    if (q.step('build') && !q.built) {
       const missing = q.parts.length - q.partsFound;
       const label = q.canBuild
         ? `BUILD THE ${q.chapter.device}`
@@ -2039,6 +2201,7 @@ export class Game {
     m.bought = true;
     if (m.id === 'juggernog') this.player.health = this.player.maxHealth;
     audio.perkJingle();
+    audio.callout('perk', 1.1);
     this.hud.setPerks([...this.player.perks]);
     this.hud.setHealth(this.player.healthFraction);
     this.finishPurchase(info.cost, info.name, false);
@@ -2084,6 +2247,7 @@ export class Game {
     this.props.pack.showWeapon(slot.id);
     window.setTimeout(() => this.props.pack.showWeapon(null), 1800);
     audio.perkJingle();
+    audio.callout('packed', 0.9);
     this.syncAmmoHud();
     this.finishPurchase(cost, tierName(def.name, slot.tier) + note, false);
   }
@@ -2122,6 +2286,7 @@ export class Game {
     if (def.rarity === 'legendary') {
       this.hud.banner('LEGENDARY', 2.4, css(info.color));
       this.legendaryFlash = 1;
+      audio.callout('legendary', 0.7);
     }
   }
 
@@ -2131,6 +2296,7 @@ export class Game {
     this.hud.setPoints(this.player.points);
     this.hud.pointsDelta(MYSTERY_BOX_COST);
     audio.teddy();
+    audio.callout('teddy', 0.5);
     this.hud.toast('THE BOX IS MOVING  ·  POINTS REFUNDED', '#ff6a4a', 2.8);
   }
 
@@ -2176,6 +2342,7 @@ export class Game {
     this.updateCamera(dt);
     this.updateHud(dt);
     this.updateWaypoint();
+    this.tags.update(dt, this.camera, this.player, this.grid);
     this.input.endFrame();
   }
 
@@ -2288,13 +2455,15 @@ export class Game {
       return;
     }
 
-    this.spawnTimer -= dt;
+    // While the station is defended the horde surges: faster spawns, and the round cannot end.
+    const surge = this.quest.defending;
+    this.spawnTimer -= dt * (surge ? 1.8 : 1);
     if (this.spawnTimer <= 0) {
       this.spawnTimer = this.plan.interval;
       this.trySpawn();
     }
 
-    if (this.spawned >= this.plan.total && this.pool.liveCount === 0) this.endRound();
+    if (!surge && this.spawned >= this.plan.total && this.pool.liveCount === 0) this.endRound();
 
     for (const [id, remaining] of [...this.activePowerups]) {
       const next = remaining - dt;
@@ -2510,7 +2679,9 @@ export class Game {
     for (const w of this.props.wallBuys) w.animate(this.elapsed);
     this.props.pack.animate(this.elapsed);
     for (const part of this.questProps.parts) part.animate(this.elapsed);
+    for (const v of this.questProps.valves) v.animate(this.elapsed, dt);
     this.questProps.bench.animate(this.elapsed);
+    this.questProps.ring.animate(this.elapsed);
     this.questProps.exit.animate(this.elapsed, dt);
   }
 

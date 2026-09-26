@@ -72,6 +72,8 @@ export class Enemy {
   yaw = 0;
   health = 0;
   maxHealth = 0;
+  /** The chapter's threat when it spawned: it hits harder the higher it is. */
+  threat = 0;
   speed = 3;
   radius = 0.7;
 
@@ -150,16 +152,17 @@ export class Enemy {
 
   spawn(
     kind: EnemyKind, x: number, z: number, health: number, round: number,
-    barricade: BarricadeProp | null, rng: Rng,
+    barricade: BarricadeProp | null, rng: Rng, threat = 0,
   ): void {
     this.kind = kind;
     this.active = true;
+    this.threat = threat;
     this.x = x;
     this.z = z;
     this.y = 0;
     this.health = health;
     this.maxHealth = health;
-    this.speed = enemySpeed(round, kind) * rng.range(0.9, 1.12);
+    this.speed = enemySpeed(round, kind, threat) * rng.range(0.9, 1.12);
     this.radius = this.model.radius;
     this.target = barricade;
     this.state = barricade ? 'approach' : 'hunt';
@@ -571,7 +574,7 @@ export class Enemy {
       if (this.attackCooldown <= 0 && this.stagger <= 0) {
         this.attackCooldown = this.kind === 'hound' ? 0.95 : 1.2;
         this.swing = 1;
-        onAttack(this, enemyDamage(this.kind));
+        onAttack(this, enemyDamage(this.kind, this.threat));
       }
       const res = grid.resolveCircle(this.x, this.z, this.radius, torn);
       this.x = res.x;

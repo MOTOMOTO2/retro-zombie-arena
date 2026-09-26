@@ -1,7 +1,10 @@
 /**
- * Room dressing. Purely visual - the horde and the player walk through all of
- * it, because solid clutter would turn an arcade arena into a snag-fest - but
- * it is what makes a room read as a chapel or a morgue at a glance.
+ * Room dressing: what makes a room read as a chapel or a morgue at a glance.
+ *
+ * Anything with real bulk at body height is solid - a mattress, a counter, a
+ * stack of crates - and `pieceAt` works that out from the geometry itself, so
+ * nothing here has to declare it. Loose paper, rubble, drip stands and privacy
+ * screens stay walk-through, which keeps the arena from becoming a snag-fest.
  *
  * Everything is merged into the level's batches and baked by the same lamps,
  * and a few pieces bring their own light: the furnace's firebox, altar

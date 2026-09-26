@@ -9,10 +9,14 @@ pools and ambient occlusion, and low-poly monsters with glowing eyes.
 It borrows its structure from *Call of Duty: Zombies* — points for hits and
 kills, doors you buy your way through, wall guns, mystery boxes that roll for a
 random (sometimes legendary) gun, perk machines behind a generator, a
-Pack-a-Punch you can go back to three times, power-up drops, boardable windows
-and an endless round curve — and its feel from *Doom*: no reload-to-cover, no
-regenerating cover system, just strafing backwards through a crowd with a
-shotgun while the walls close in.
+Pack-a-Punch you can go back to three times, traps you switch on with points,
+power-up drops, boardable windows and an endless round curve — and its feel
+from *Doom*: no reload-to-cover, no regenerating cover system, just strafing
+backwards through a crowd with a shotgun while the walls close in.
+
+Nothing on the HUD tells you where to go. The objective list says what the job
+is; which room it is in is for you to find, and where everything stands changes
+every single run.
 
 It also has somewhere to go. Four chapters on four maps tell one story over the
 radio, each with a job to do, a boss at the end of it and a way out; escape one
@@ -142,10 +146,10 @@ from the first round.
 
 An objective list sits under your points — with the valve clock, the kill
 count and the defence timer ticking beside the job in hand, flashing red when
-you are running out of time or have wandered out of the ring — a marker points
-at whatever comes next (pinned to the edge of the screen when it is behind you),
-and Voss narrates in subtitles. Your best round and fastest escape on each map are saved to
-`localStorage`.
+you are running out of time or have wandered out of the ring — and Voss
+narrates in subtitles. Nothing points at where to go: the list tells you what
+the job is, and the building is yours to learn. Your best round and fastest
+escape on each map are saved to `localStorage`.
 
 **The bosses.** Each is built on the zombie rig at nearly twice the size, scales
 its health with the round it arrives in, and ignores the nuke and insta-kill.
@@ -186,16 +190,28 @@ you rather than showing the whole thing.
   flamethrower). Take it within nine seconds. After four to nine pulls a teddy
   bear comes up instead, refunds you and the box flies off to another pad. The
   bigger maps run two boxes at once.
-- **The generator** is always the room farthest from where you start. Until you
-  flip it, the perk machines and Pack-a-Punch are dead metal.
+- **The generator** is the one fixture with a rule about where it lands: at
+  least two doors in, and further off than anything the start room sells.
+  Which of the deep rooms it is changes every run. Until you flip it, the perk
+  machines, the traps and Pack-a-Punch are dead metal.
 - **Perks** (max four): Quick Revive, Juggernog, Speed Cola, Double Tap,
   Stamin-Up. Only Quick Revive works without power.
-- **Pack-a-Punch** works three times on the same gun: tier I (5000), II (7500)
-  and III (10000) take its damage to ×2.4, ×3.6 and ×5, grow the magazine and
+- **Pack-a-Punch** works three times on the same gun: tier I (3000), II (5000)
+  and III (7000) take its damage to ×2.4, ×3.6 and ×5, grow the magazine and
   reserve, and each paint it in a new glowing camo. Tier II also rolls an
   **ammo mod** — Dead Wire (lightning arcs), Blast Furnace (sets the crowd
   alight) or Cryofreeze (freezes a knot of them) — which tier III fires more
-  often.
+  often. It is not in the generator room any more; it is wherever the layout
+  put it.
+- **Traps** cost 1000 and every map has two or three: a hazard-striped lever on
+  the wall with a pylon either side of it. Throw the switch and the floor
+  between the pylons cooks for twenty-six seconds — **electro-shock** locks
+  bodies up and fries them where they stand, **flame vents** set them alight and
+  they burn on out of the zone. Then the trap has to cool down for twenty-two
+  seconds before it will take your money again. The damage is pinned to the
+  round's own health curve, so a trap always kills an ordinary body in about a
+  third of a second: it is a choke point you can buy, not a weapon that falls
+  behind. Kills in it pay you, and it will not hurt you.
 - **Power-ups** drop from kills: Max Ammo, Insta-Kill, Double Points, Nuke,
   Carpenter. The announcer calls each one.
 - **Hits show.** Anything you hurt gets a small health bar over its head that
@@ -205,11 +221,47 @@ you rather than showing the whole thing.
   number.
 - **Every fifth round** is a hellhound round: fewer enemies, much faster, and the
   round always ends in max ammo.
+- **Nothing is where it was last time.** Pack-a-Punch, the perk machines, the
+  wall guns, the mystery box pads, the traps and the quest props each get their
+  own shuffle of the rooms. The mystery box can start anywhere on the map, not
+  just where you wake up. The only fixtures that stay put are the ones the
+  opening depends on: the start room's shotgun, its second gun, Quick Revive
+  and the way out.
 
 Enemy health is flat-ish for nine rounds (150 → 950), then compounds at 10% per
-round, so eventually nothing you own will kill in one magazine. Runners appear
-from round 4, brutes from round 8. While a boss is alive the rest of the horde
-thins out, so the fight is about the boss.
+round, so eventually nothing you own will kill in one magazine. While a boss is
+alive the rest of the horde thins out, so the fight is about the boss.
+
+### What is coming at you
+
+Seven kinds, all built out of the same low-poly body at their own size, tint and
+stoop, so a crowd reads at a glance. They phase in as the rounds climb, and
+each round mixes them rather than picking one — a chapter's threat brings each
+of them forward by a round and a half.
+
+| | From | What it does |
+| --- | --- | --- |
+| **Shambler** | 1 | The baseline. There are always some. |
+| **Crawler** | 3 | Legless, dragging itself along the floor with its head about a metre up. Slow, weak, and easy to shoot over the top of. |
+| **Sprinter** | 4 | Lighter and much faster; the one that gets behind you. |
+| **Bloater** | 5 | Swollen and yellow. Bursts when it dies — 55 to you at the centre of it, 420 to everything else in seven metres, and it leaves the floor bubbling. A packed room goes off in a chain. |
+| **Spitter** | 6 | Sickly green, and it will not close. It holds seventeen metres off and lobs bile that leaves a burning patch where it lands. |
+| **Armoured** | 7 | Riot padding and a helmet: body shots do 40%, headshots do the lot. |
+| **Brute** | 8 | Head and shoulders over everything else, more than twice the health, hits for 58. |
+| **Hellhound** | 5, 10, 15… | Their own round. Fast, low, and they come in packs. |
+
+### Getting around
+
+There is no objective marker and no arrow on the minimap pointing at the
+answer. What there is:
+
+- the **objective list**, which says what the job is;
+- **light in the world** — the mystery boxes stand under a faint blue beam, the
+  quest parts under a green one, perk machines glow once the power is on, and
+  trap lamps read green while running and amber while recharging;
+- the **minimap** on `Tab`, which draws the building around you and marks the
+  powered machines, the boxes, the traps, power-up drops and the horde;
+- **door signs**, which name the room on the other side before you pay.
 
 ## Graphics settings
 
@@ -248,7 +300,7 @@ src/
   world/
     maps.ts            the four map profiles: size, openness, kinds of room
     mapdata.ts         the layout generator and the rules every layout must pass
-    grid.ts            circle/tile collision, DDA raycasting, BFS flow field
+    grid.ts            circle/tile collision, the obstacle layer, DDA rays, flow field
     themes.ts          what each kind of room (and passage) looks like
     lighting.ts        shadowed light bake, moonlight, light probe
     batch.ts           merges static geometry per material and bakes it
@@ -259,7 +311,7 @@ src/
     dress-town.ts      streets, square, churchyard, houses, shop, garage
     dress-works.ts     loading bays, casting floor, warehouses, container yard
     dress-labs.ts      labs, specimen tanks, servers, cryo, reactor
-    props.ts           doors, windows, perk machines, box, Pack-a-Punch
+    props.ts           doors, windows, perk machines, box, traps, Pack-a-Punch
     questprops.ts      the parts, the workbench and the exit
   game/
     rules.ts           round curve, scoring, perks, power-ups (pure)
@@ -273,12 +325,12 @@ src/
     quest.ts           power -> parts -> build -> boss -> escape (pure)
     progress.ts        unlocks and per-map records (pure rules, localStorage)
     viewmodel.ts       first-person weapon, hands and reload choreography
-    hud.ts             DOM HUD: objectives, radio, boss bar, marker, minimap
+    hud.ts             DOM HUD: objectives, radio, boss bar, minimap
     tags.ts            health bars and damage numbers over the horde
     game.ts            the loop that ties it together
 test/
   logic.test.ts        69 unit tests over the pure half of the game
-  browser-smoke.mjs    213 checks driving the real game in headless Chromium
+  browser-smoke.mjs    238 checks driving the real game in headless Chromium
 tools/
   mapcheck.mjs         prints a generated layout as ASCII, or sweeps many seeds
   hudcost.mjs          times a frame with the HUD painted once a frame vs per step
@@ -358,8 +410,8 @@ zombies over a fully opened map and times how long they take to find you.
 
 **The story is a small state machine.** `quest.ts` knows only power, three
 parts, built, the boss's state and escaped; every transition returns the story
-beats it produced, and the game turns those into radio subtitles, banners,
-sounds and the objective marker. Because it is pure, the whole chain is unit
+beats it produced, and the game turns those into radio subtitles, banners and
+sounds. Because it is pure, the whole chain is unit
 tested. **Bosses** are `Enemy` subclasses: they hunt with the same flow field,
 but between thinks they pick a move whose cooldown is ready and whose range
 fits — a slam up close, a charge or a leap at range, a lob at anything in
@@ -457,7 +509,7 @@ draw calls however much detail it carries.
 **The simulation and the picture run on different clocks.** The world steps at a
 fixed 120 Hz, up to eight steps a frame, so the physics and the horde behave the
 same however fast the machine is. Presentation - the HUD, the bars and numbers
-over the horde, the objective marker and the minimap - is DOM and canvas work
+over the horde and the minimap - is DOM and canvas work
 whose only consumer is the screen, so the frame loop paints it once per drawn
 frame instead. Doing it per step painted it two to four times over, and because
 the tags measure the window after writing eighty inline styles, each repeat cost
@@ -480,7 +532,7 @@ npm test              # 69 unit tests (node:test, runs .ts directly)
 npm run map           # prints a random asylum and validates it
 npm run map -- --map=labs --sweep 1000   # generates and validates a thousand seeds
 npm run build         # type-check + bundle
-npm run test:browser  # builds, then runs 213 checks in real headless Chromium
+npm run test:browser  # builds, then runs 238 checks in real headless Chromium
 npm run hudcost       # what the HUD costs per frame, painted once a frame vs per step
 ```
 
@@ -510,7 +562,16 @@ map that no longer exists - rather than putting NaN onto the chapter cards.
 
 `npm run test:browser` is the one that matters for "does it actually work". It
 builds, serves `dist/`, opens it in headless Chromium with software WebGL, and
-drives the real game object. It reads the low-resolution framebuffer back and
+drives the real game object. Two of its sections are there specifically to hold
+the line on the two riskiest things in the game: that solid furniture has not
+sealed anything off, and that every kind of zombie does its own thing. The
+first walks all four maps on a one-unit lattice, using the real collision code
+as the test for whether the player's own body fits — about two hundred thousand
+cells — with every door open, and fails if a single machine, pad, trap or quest
+prop has been walled in. The second spawns one of each kind and checks that a
+brute is bigger than a shambler, that a crawler's head is near the floor, that
+armour blunts a body shot and not a headshot, that a bloater's death hurts the
+body standing next to it and that a spitter throws instead of closing. It reads the low-resolution framebuffer back and
 asserts the world rasterised with a real tonal range; runs 45 seconds of round 1
 and checks that enemies spawn, tear boards off windows, get inside and hurt an
 idle player; buys a door and confirms the tile became walkable; buys a wall gun,
@@ -541,7 +602,7 @@ steam valve in the ironworks and lets the clock run out, feeds the crucible a
 kill inside its ring and one outside it, checks Sublevel 9's vents stay locked
 without the keycard and that its round three is tougher than the asylum's;
 plays the whole
-story on the asylum — objectives, marker and radio, power, the three parts,
+story on the asylum — objectives and radio, power, the three parts,
 the build, the boss arriving through a window with its health bar, surviving
 a nuke, dying, the exit opening, the victory screen and the next chapter
 unlocking; sets each of the four bosses on an idle player and checks it
@@ -601,10 +662,35 @@ asked:
   run. Quick Revive instead speeds up health regeneration.
 - **A survival bonus at the end of each round**, which the source material does
   not have, to keep early rounds from dragging.
-- **Room dressing has no collision.** Pews, desks, crates and the boiler are
-  there to give each room a silhouette; you and the horde walk through them.
-  Solid clutter would need per-prop collision and would turn the arena into a
-  snag-fest, which is the opposite of arcade.
+- **Furniture is solid, clutter is not.** The nav grid has an obstacle layer
+  under the tiles, and everything with real bulk goes in it: the machines, the
+  mystery boxes (which move), the trap pylons, the workbench, and any piece of
+  set dressing with a chunky box at body height. `pieceAt` works that out from
+  the geometry a piece emits rather than making every dresser declare it, which
+  is why all four maps got it at once. Loose paper, rubble, drip stands and
+  privacy screens stay walk-through, no single box is allowed to be wider than
+  a tile, and each one is pulled in 8% so a body brushes past rather than
+  snagging — the arena keeps its clean lines, but the horde no longer strolls
+  through a vending machine.
+- **Obstacles do not move the pathfinding.** The flow field is still tile-based
+  and knows nothing about them. They are all far smaller than the rooms they
+  stand in, the push-out slides a body round them, and the enemy's own stuck
+  detection shoulders it sideways; a sub-tile navigation mesh would cost far
+  more than it is worth here. Bullets ignore them too — you can shoot a zombie
+  through a crate, which is the arcade answer and the one the rest of the game
+  already gave.
+- **No objective marker.** The one on the HUD used to name the exact spot and
+  the distance to it, which made every map the same map. Finding the room is
+  the game now; the props light themselves, and the minimap draws what you have
+  turned on rather than where you should be going.
+- **Traps do not hurt the player.** In the source material the electric trap
+  will kill you too. With nothing marking where the traps are, and their
+  position rolled fresh every run, walking into one you had not found yet would
+  be a death with no lesson in it.
+- **Almost everything is placed at random**, including Pack-a-Punch and the
+  first mystery box, which can now be behind any door on the map. Only the
+  generator has a floor on how deep it is, and only the start room keeps a
+  fixed loadout, so the opening thirty seconds of a run are always playable.
 - **No gore beyond blood particles and decals** — bodies crumple and sink rather
   than dismembering, other than the gib-on-overkill case.
 - **Weapons are modelled from references, not downloaded.** Third-party gun

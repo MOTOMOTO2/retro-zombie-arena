@@ -26,9 +26,25 @@ type Settings = {
   brightness: number;
   healthBars: boolean;
   damageNumbers: boolean;
+  /** How much of the camera shake to apply, 0..100. */
+  shake: number;
+  /** How much of the walking bob and sway to apply, 0..100. */
+  sway: number;
   /** Only the actions the player has actually rebound; the rest keep their defaults. */
   keys: Partial<Record<Action, string[]>>;
 };
+
+/**
+ * Whether the browser says this player would rather things held still. Camera
+ * shake and view sway start off for them, and they can turn either back up.
+ */
+function prefersStill(): boolean {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
 
 const DEFAULTS: Settings = {
   quality: DEFAULT_QUALITY,
@@ -40,6 +56,8 @@ const DEFAULTS: Settings = {
   brightness: 50,
   healthBars: true,
   damageNumbers: true,
+  shake: prefersStill() ? 0 : 100,
+  sway: prefersStill() ? 0 : 100,
   keys: {},
 };
 
@@ -71,26 +89,53 @@ function cleanKeys(raw: unknown): Partial<Record<Action, string[]>> {
   return out;
 }
 
+/** The range each slider is allowed to sit in, matching the markup. */
+const RANGES: Record<'sensitivity' | 'volume' | 'musicVolume' | 'fov' | 'brightness' | 'shake' | 'sway', [number, number]> = {
+  sensitivity: [4, 60],
+  volume: [0, 100],
+  musicVolume: [0, 100],
+  fov: [65, 110],
+  brightness: [0, 100],
+  shake: [0, 100],
+  sway: [0, 100],
+};
+
+/**
+ * Pulls every setting back into the range it is allowed. Stored settings are
+ * just JSON someone could have edited, and a slider holding a string or a NaN
+ * would go straight into the camera and take the whole view with it.
+ */
+function cleanSettings(s: Settings): Settings {
+  if (!QUALITY_PRESETS[s.quality]) s.quality = DEFAULT_QUALITY;
+  for (const [key, [lo, hi]] of Object.entries(RANGES) as [keyof typeof RANGES, [number, number]][]) {
+    const n = Number(s[key]);
+    s[key] = Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : DEFAULTS[key];
+  }
+  s.invertY = s.invertY === true;
+  s.healthBars = s.healthBars !== false;
+  s.damageNumbers = s.damageNumbers !== false;
+  s.keys = cleanKeys(s.keys);
+  return s;
+}
+
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
-      const s = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
-      if (!QUALITY_PRESETS[s.quality]) s.quality = DEFAULT_QUALITY;
-      s.keys = cleanKeys(s.keys);
-      return s;
+      const parsed = JSON.parse(raw) as Partial<Settings> | null;
+      return cleanSettings({ ...DEFAULTS, ...(parsed && typeof parsed === 'object' ? parsed : {}) });
     }
     const legacy = localStorage.getItem(LEGACY_SETTINGS_KEY);
     if (legacy) {
       const old = JSON.parse(legacy) as Partial<Settings>;
-      return {
+      return cleanSettings({
         ...DEFAULTS,
         sensitivity: old.sensitivity ?? DEFAULTS.sensitivity,
         volume: old.volume ?? DEFAULTS.volume,
         invertY: old.invertY ?? DEFAULTS.invertY,
         fov: old.fov ?? DEFAULTS.fov,
         keys: cleanKeys(old.keys),
-      };
+      });
     }
     return { ...DEFAULTS };
   } catch {
@@ -189,6 +234,8 @@ function boot(): void {
   const invertInput = el<HTMLInputElement>('opt-invert');
   const fovInput = el<HTMLInputElement>('opt-fov');
   const brightInput = el<HTMLInputElement>('opt-bright');
+  const shakeInput = el<HTMLInputElement>('opt-shake');
+  const swayInput = el<HTMLInputElement>('opt-sway');
   const barsInput = el<HTMLInputElement>('opt-bars');
   const numbersInput = el<HTMLInputElement>('opt-numbers');
 
@@ -236,6 +283,8 @@ function boot(): void {
     audio.setMusicVolume(settings.musicVolume / 100);
     game.tags.showBars = settings.healthBars;
     game.tags.showNumbers = settings.damageNumbers;
+    game.shakeScale = settings.shake / 100;
+    game.bobScale = settings.sway / 100;
     game.input.setBindings(settings.keys);
     renderHowtoKeys();
     el('val-sens').textContent = (settings.sensitivity / 10).toFixed(1);
@@ -243,6 +292,8 @@ function boot(): void {
     el('val-music').textContent = String(settings.musicVolume);
     el('val-fov').textContent = String(settings.fov);
     el('val-bright').textContent = String(settings.brightness);
+    el('val-shake').textContent = String(settings.shake);
+    el('val-sway').textContent = String(settings.sway);
     qualitySel.value = settings.quality;
     sensInput.value = String(settings.sensitivity);
     volInput.value = String(settings.volume);
@@ -250,6 +301,8 @@ function boot(): void {
     invertInput.checked = settings.invertY;
     fovInput.value = String(settings.fov);
     brightInput.value = String(settings.brightness);
+    shakeInput.value = String(settings.shake);
+    swayInput.value = String(settings.sway);
     barsInput.checked = settings.healthBars;
     numbersInput.checked = settings.damageNumbers;
     saveSettings(settings);
@@ -281,6 +334,14 @@ function boot(): void {
   });
   brightInput.addEventListener('input', () => {
     settings.brightness = Number(brightInput.value);
+    applySettings();
+  });
+  shakeInput.addEventListener('input', () => {
+    settings.shake = Number(shakeInput.value);
+    applySettings();
+  });
+  swayInput.addEventListener('input', () => {
+    settings.sway = Number(swayInput.value);
     applySettings();
   });
   barsInput.addEventListener('change', () => {
@@ -709,7 +770,12 @@ function boot(): void {
   };
 
   // Debug handle. The headless smoke test drives the game through this.
-  (window as unknown as { __RZA: unknown }).__RZA = { game, audio, settings, progress };
+  (window as unknown as { __RZA: unknown }).__RZA = {
+    game, audio, settings, progress,
+    // Re-reads settings out of storage, so the smoke test can check what the
+    // game makes of a saved file without reloading the page.
+    reloadSettings: loadSettings,
+  };
 
   bootScreen.classList.add('hidden');
   game.onStateChange('menu');

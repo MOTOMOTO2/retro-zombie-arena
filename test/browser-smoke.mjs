@@ -878,6 +878,67 @@ try {
   check('the wedge follows where the player is facing', hurt.turned.deg === 90, JSON.stringify(hurt.turned));
   check('damage with no direction shows no wedge', hurt.noDirection.shown === false, JSON.stringify(hurt.noDirection));
 
+  // ------------------------------------------------- shake, sway and settings
+  const motion = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun(999);
+    const p = game.player;
+    p.yaw = 0;
+    p.pitch = 0;
+
+    // How far the camera wanders over a second of the biggest shake there is.
+    const spread = () => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < 60; i++) {
+        game.shake = 4;
+        game.update(1 / 60);
+        lo = Math.min(lo, game.camera.position.x);
+        hi = Math.max(hi, game.camera.position.x);
+      }
+      return hi - lo;
+    };
+    game.shakeScale = 1;
+    const shaky = spread();
+    game.shakeScale = 0;
+    const still = spread();
+    out.shakeMoves = shaky > 0.02;
+    out.shakeOffIsStill = still < 1e-9;
+    out.shakeScales = shaky > still * 10 || still === 0;
+    game.shakeScale = 1;
+
+    // The slider drives it, and settles at both ends.
+    const slider = document.getElementById('opt-shake');
+    const set = (v) => {
+      slider.value = String(v);
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    set(0);
+    out.sliderOff = game.shakeScale === 0 && document.getElementById('val-shake').textContent === '0';
+    set(40);
+    out.sliderScales = Math.abs(game.shakeScale - 0.4) < 1e-9;
+    set(100);
+    out.sliderBack = game.shakeScale === 1;
+
+    // Nonsense in storage must not reach the camera.
+    const saved = localStorage.getItem('rza.settings.v2');
+    localStorage.setItem('rza.settings.v2', JSON.stringify({
+      quality: 'nope', shake: 'lots', sway: null, fov: 1e9, sensitivity: -5, volume: NaN,
+    }));
+    const loaded = window.__RZA.reloadSettings();
+    out.badQualityFalls = Boolean(loaded.quality) && loaded.quality !== 'nope';
+    out.badNumbersFall = [loaded.shake, loaded.sway, loaded.fov, loaded.sensitivity, loaded.volume]
+      .every((n) => Number.isFinite(n));
+    out.numbersStayInRange = loaded.fov <= 110 && loaded.fov >= 65 && loaded.sensitivity >= 4
+      && loaded.shake >= 0 && loaded.shake <= 100;
+    out.cameraStaysFinite = Number.isFinite(game.camera.position.x) && Number.isFinite(game.camera.position.y);
+    if (saved === null) localStorage.removeItem('rza.settings.v2');
+    else localStorage.setItem('rza.settings.v2', saved);
+    return out;
+  });
+  for (const [k, v] of Object.entries(motion)) check(`motion: ${k}`, v === true);
+
   // --------------------------------------------------------- rebinding keys
   const keys = await page.evaluate(async () => {
     const { game } = window.__RZA;

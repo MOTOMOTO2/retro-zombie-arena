@@ -258,6 +258,15 @@ export class Game {
    */
   hostPresents = false;
 
+  /**
+   * How much of the camera shake to actually apply, 0..1. Explosions, boss
+   * slams and the bigger guns all kick the view, which is a lot of movement for
+   * anyone it makes ill; the settings screen turns it down or off.
+   */
+  shakeScale = 1;
+  /** How much of the walking bob and sway to apply, 0..1. Same reason. */
+  bobScale = 1;
+
   private repairHold = 0;
   private legendaryFlash = 0;
   private fieldTimer = 0;
@@ -2776,18 +2785,22 @@ export class Game {
     const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.09 * bobAmount;
     const bobX = Math.sin(this.bobPhase * 0.5) * 0.06 * bobAmount;
 
-    const shakeX = this.shake > 0 ? this.rng.range(-1, 1) * this.shake * 0.035 : 0;
-    const shakeY = this.shake > 0 ? this.rng.range(-1, 1) * this.shake * 0.035 : 0;
+    // Every gun, blast and boss feeds the one shake value, so the setting only
+    // has to be applied here.
+    const kick = this.shake * 0.035 * this.shakeScale;
+    const shakeX = kick > 0 ? this.rng.range(-1, 1) * kick : 0;
+    const shakeY = kick > 0 ? this.rng.range(-1, 1) * kick : 0;
+    const sway = this.bobScale;
 
     this.camera.position.set(
-      p.x + bobX * 0.3 + shakeX,
-      p.y + EYE_HEIGHT + bobY + shakeY,
+      p.x + bobX * 0.3 * sway + shakeX,
+      p.y + EYE_HEIGHT + bobY * sway + shakeY,
       p.z,
     );
     this.camera.rotation.set(0, 0, 0);
     this.camera.rotateY(p.yaw);
     this.camera.rotateX(p.pitch);
-    this.camera.rotateZ(Math.sin(this.bobPhase * 0.5) * 0.012 * bobAmount + shakeX * 0.4);
+    this.camera.rotateZ(Math.sin(this.bobPhase * 0.5) * 0.012 * bobAmount * sway + shakeX * 0.4);
 
     const scoped = this.viewmodel.scopeView;
     const targetFov = this.fovBase * (scoped ? 0.3 : this.input.aim ? 0.72 : 1) * (p.sprinting ? 1.045 : 1);

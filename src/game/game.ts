@@ -45,6 +45,7 @@ import {
   type PropSet,
 } from '../world/props.ts';
 import { Enemy, EnemyPool, rayHitsEnemy } from './enemy.ts';
+import { Horde } from './horde.ts';
 import { Hud, type MinimapBlip } from './hud.ts';
 import { EYE_HEIGHT, Player } from './player.ts';
 import {
@@ -63,6 +64,7 @@ import {
   TRAP_SECONDS,
   enemyHealth,
   healthFor,
+  hordeCunning,
   houndHealth,
   POWERUPS,
   POWERUP_IDS,
@@ -228,6 +230,8 @@ export class Game {
   /** True while the world built at boot has not been played yet. */
   private worldFresh = false;
   private readonly pool = new EnemyPool();
+  /** The crowd's shared brain: whose field each body follows, and why. */
+  private readonly horde = new Horde();
   /** Health bars and damage numbers over the horde. */
   readonly tags: EnemyTags;
   private readonly particles = new ParticleField(1200, 0.2);
@@ -283,7 +287,6 @@ export class Game {
 
   private repairHold = 0;
   private legendaryFlash = 0;
-  private fieldTimer = 0;
   private bobPhase = 0;
   private stepTimer = 0;
   private shake = 0;
@@ -535,6 +538,7 @@ export class Game {
     this.player.pitch = 0;
 
     this.pool.reset();
+    this.horde.reset();
     this.tags.clear();
     this.clearBossEffects();
     this.quest = new Quest(this.layout.map);
@@ -905,7 +909,7 @@ export class Game {
     for (const e of hits) {
       this.damageEnemy(
         e, shotDamage(def, { head: false, doubleTap: false, instaKill: false, tier }) * (e.isBoss ? 0.15 : 1),
-        false, true, new THREE.Vector3(e.x, e.headY, e.z),
+        false, true, new THREE.Vector3(e.headX, e.headY, e.headZ),
       );
     }
     this.shake = 4;
@@ -1168,7 +1172,7 @@ export class Game {
       const falloff = 1 - d / radius;
       this.damageEnemy(
         e, damage * falloff * falloff, false, true,
-        new THREE.Vector3(e.x, e.headY, e.z), { x, z },
+        new THREE.Vector3(e.headX, e.headY, e.headZ), { x, z },
       );
     });
     if (this.player.kills - killsBefore >= 3) audio.callout('multikill', 0.35);
@@ -1228,7 +1232,7 @@ export class Game {
       // The head is gone: a fountain from the neck.
       for (let i = 0; i < 22; i++) {
         this.particles.spawn(
-          e.x, e.headY - 0.35, e.z,
+          e.headX, e.headY - 0.35, e.headZ,
           this.rng.range(-2.5, 2.5) + dirX * 2, this.rng.range(6, 13), this.rng.range(-2.5, 2.5) + dirZ * 2,
           BLOOD_COLOR, this.rng.range(0.5, 1.1), 26,
         );
@@ -1249,7 +1253,8 @@ export class Game {
     if (res.gibbed) e.model.root.visible = false;
     else if (e.kind !== 'hound' && this.rng.chance(0.65)) audio.zombieVoice({ x: e.x, z: e.z }, 'death', this.voicePitch(e));
     const kindOfKill = explosive ? 'explosive' : head ? 'head' : 'body';
-    const award = scoreForKill(kindOfKill, doublePoints);
+    // What it was worth: one for the rank and file, four times over for a tank.
+    const award = scoreForKill(kindOfKill, doublePoints, ENEMY_INFO[e.kind].score);
     this.player.award(award);
     this.player.kills++;
     if (head) this.player.headshots++;
@@ -1362,7 +1367,7 @@ export class Game {
       const d = Math.hypot(e.x - x, e.z - z);
       if (d > radius || !this.grid.lineOfSight(x, z, e.x, e.z)) return;
       const falloff = 1 - d / radius;
-      this.damageEnemy(e, BOMBER_SPLASH * falloff, false, true, new THREE.Vector3(e.x, e.headY, e.z), { x, z });
+      this.damageEnemy(e, BOMBER_SPLASH * falloff, false, true, new THREE.Vector3(e.headX, e.headY, e.headZ), { x, z });
     });
     const pd = Math.hypot(this.player.x - x, this.player.z - z);
     if (pd < radius && this.player.alive) {
@@ -2573,11 +2578,12 @@ export class Game {
     if (!target) return;
     const dmg = this.activePowerups.has('instakill') && !target.isBoss ? 1e6 : def.damage;
     const killedBefore = target.health;
-    this.damageEnemy(target, dmg, false, false, new THREE.Vector3(target.x, target.headY, target.z));
+    this.damageEnemy(target, dmg, false, false, new THREE.Vector3(target.headX, target.headY, target.headZ));
     if (killedBefore <= dmg) {
       // Melee kills pay the premium rate.
-      const extra = scoreForKill('melee', this.activePowerups.has('doublepoints'))
-        - scoreForKill('body', this.activePowerups.has('doublepoints'));
+      const worth = ENEMY_INFO[target.kind].score;
+      const extra = scoreForKill('melee', this.activePowerups.has('doublepoints'), worth)
+        - scoreForKill('body', this.activePowerups.has('doublepoints'), worth);
       this.player.award(extra);
       this.hud.setPoints(this.player.points);
     }
@@ -2608,12 +2614,14 @@ export class Game {
   }
 
   private updateEnemies(dt: number): void {
-    this.fieldTimer -= dt;
-    if (this.fieldTimer <= 0) {
-      this.fieldTimer = 0.14;
-      const { tx, tz } = worldToTile(this.player.x, this.player.z);
-      this.grid.buildFlowField(tx, tz, this.torn);
-    }
+    // The horde picks its goals, rebuilds their fields and deals out the roles
+    // before anything moves; each body then walks the field it was given.
+    this.horde.update(dt, this.grid, this.torn, {
+      x: this.player.x,
+      z: this.player.z,
+      fx: -Math.sin(this.player.yaw),
+      fz: -Math.cos(this.player.yaw),
+    }, this.pool.all, hordeCunning(this.round, this.quest.threat));
 
     for (const e of this.pool.all) {
       if (!e.active) continue;
@@ -2650,9 +2658,10 @@ export class Game {
         },
         (enemy, toX, toZ) => {
           // A spitter, holding its ground and throwing bile.
-          this.lobShot('acid', enemy.x, enemy.headY - 0.2, enemy.z, toX + this.rng.range(-2, 2), toZ + this.rng.range(-2, 2));
+          this.lobShot('acid', enemy.headX, enemy.headY - 0.2, enemy.headZ, toX + this.rng.range(-2, 2), toZ + this.rng.range(-2, 2));
           audio.zombieVoice({ x: enemy.x, z: enemy.z }, 'scream', 1.25);
         },
+        this.horde,
       );
     }
 
@@ -2707,7 +2716,7 @@ export class Game {
   private voicePitch(e: Enemy): number {
     const base = {
       walker: 1, runner: 1.18, brute: 0.72, hound: 1,
-      crawler: 0.88, armoured: 0.78, spitter: 1.3, bomber: 0.68,
+      crawler: 0.88, armoured: 0.78, spitter: 1.3, bomber: 0.68, tank: 0.52,
     }[e.kind];
     return base * this.rng.range(0.9, 1.1);
   }
@@ -2782,7 +2791,7 @@ export class Game {
             hx = nx;
             hy = ny;
             hz = nz;
-            this.damageEnemy(e, p.direct, false, true, new THREE.Vector3(e.x, e.headY, e.z));
+            this.damageEnemy(e, p.direct, false, true, new THREE.Vector3(e.headX, e.headY, e.headZ));
           }
         });
       }
@@ -2832,16 +2841,22 @@ export class Game {
 
   /** Keeps each mystery box's solid box on the crate, and off while it flies. */
   private syncBoxSolids(): void {
+    let moved = false;
     for (let i = 0; i < this.boxSolids.length; i++) {
       const u = this.boxes.units[i];
       const o = this.boxSolids[i];
       const f = u.prop.footprint;
+      const live = u.enabled && u.state !== 'away' && u.state !== 'leaving';
+      if (o.x !== f.x || o.z !== f.z || o.hx !== f.hx || o.hz !== f.hz || o.active !== live) moved = true;
       o.x = f.x;
       o.z = f.z;
       o.hx = f.hx;
       o.hz = f.hz;
-      o.active = u.enabled && u.state !== 'away' && u.state !== 'leaving';
+      o.active = live;
     }
+    // A box that has packed up and moved changes where the horde can walk, so
+    // the fill map wants remeasuring - but only when one has actually shifted.
+    if (moved) this.grid.obstaclesChanged();
   }
 
   private updateProps(dt: number): void {

@@ -39,6 +39,7 @@ import {
   tierName,
 } from '../src/game/weapons.ts';
 import {
+  ENEMY_INFO,
   PERK_INFO,
   POWERUPS,
   MAX_THREAT,
@@ -46,6 +47,7 @@ import {
   enemyDamage,
   enemyHealth,
   enemySpeed,
+  hordeCunning,
   isHoundRound,
   maxAlive,
   maxHealth,
@@ -53,7 +55,12 @@ import {
   roundMix,
   scoreForKill,
   spawnInterval,
+  type EnemyKind,
 } from '../src/game/rules.ts';
+import * as THREE from 'three';
+import { Enemy, rayHitsEnemy } from '../src/game/enemy.ts';
+import type { ZombieModel } from '../src/gfx/models.ts';
+import { manoeuvres } from '../src/game/horde.ts';
 
 import { MAPS, MAP_ORDER } from '../src/world/maps.ts';
 import { BOSS_DELAY, Quest } from '../src/game/quest.ts';

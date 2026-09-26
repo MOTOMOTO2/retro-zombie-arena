@@ -209,6 +209,8 @@ export type ZombieLook = {
   wide: number;
   outfit: Outfit;
   cloth: number;
+  /** A tank's body: slab shoulders, a neck brace and plated forearms. */
+  bulk?: boolean;
   /** Bosses glow a different colour. */
   eyes?: THREE.Material;
 };
@@ -290,6 +292,18 @@ export function buildZombie(look: ZombieLook): ZombieModel {
     for (let i = 0; i < 3; i++) box(body, 0.42 * w, 0.05 * s, 0.05, 0, (0.76 + i * 0.12) * s, 0.31 * w, bone);
   }
   box(body, 0.3 * w, 0.2 * s, 0.3 * w, 0, 1.36 * s, 0, skin);
+  if (look.bulk) {
+    // Slab shoulders over a brace round the neck, and a plate across the chest.
+    for (const side of [-1, 1]) {
+      box(body, 0.34 * w, 0.44 * s, 0.56 * w, side * 0.52 * w, 1.1 * s, 0, dark);
+      box(body, 0.3 * w, 0.16 * s, 0.5 * w, side * 0.5 * w, 1.34 * s, 0, bone);
+    }
+    box(body, 0.66 * w, 0.22 * s, 0.46 * w, 0, 1.3 * s, 0.04, dark);
+    box(body, 0.78 * w, 0.5 * s, 0.1, 0, 0.78 * s, 0.3 * w, dark);
+    for (let i = 0; i < 3; i++) {
+      box(body, 0.16 * w, 0.4 * s, 0.06, (i - 1) * 0.26 * w, 0.78 * s, 0.35 * w, bone);
+    }
+  }
 
   const head = new THREE.Group();
   head.position.set(0, 1.45 * s, 0.06);
@@ -315,6 +329,11 @@ export function buildZombie(look: ZombieLook): ZombieModel {
     fore.position.set(0, -0.68 * s, 0);
     arm.add(fore);
     box(fore, 0.24 * w, 0.66 * s, 0.24 * w, 0, -0.32 * s, 0, skin);
+    if (look.bulk) {
+      // Strapped-on plating, and knuckles to match.
+      box(fore, 0.3 * w, 0.36 * s, 0.3 * w, 0, -0.3 * s, 0, dark);
+      box(fore, 0.32 * w, 0.14 * s, 0.2 * w, 0, -0.76 * s, 0, bone);
+    }
     // Hand and hooked fingers.
     box(fore, 0.26 * w, 0.24 * s, 0.14 * w, 0, -0.74 * s, 0, skin);
     for (let f = -1; f <= 1; f++) {

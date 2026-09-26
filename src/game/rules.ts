@@ -19,7 +19,9 @@ export type EnemyKind =
   /** Hangs back and lobs bile that leaves the floor burning. */
   | 'spitter'
   /** Swollen with gas: bursts when it dies, and takes the crowd with it. */
-  | 'bomber';
+  | 'bomber'
+  /** Head and shoulders above the rest, slow, and worth four ordinary kills. */
+  | 'tank';
 
 /**
  * What each kind is, how it is built out of the shared body, and what it does
@@ -40,40 +42,51 @@ export type EnemyInfo = {
   range: number;
   /** Radius of the burst when it dies, 0 for everything else. */
   burst: number;
+  /** Kill score is multiplied by this: the big ones are worth going after. */
+  score: number;
+  /** Which pooled body it is built from. */
+  build: EnemyBuild;
 };
+
+/** The three shapes the enemy pool keeps bodies for. */
+export type EnemyBuild = 'humanoid' | 'hound' | 'tank';
 
 export const ENEMY_INFO: Record<EnemyKind, EnemyInfo> = {
   walker: {
     kind: 'walker', name: 'SHAMBLER', health: 1, tint: [1, 1, 1], scale: 1,
-    lean: 0, bodyArmour: 1, range: 0, burst: 0,
+    lean: 0, bodyArmour: 1, range: 0, burst: 0, score: 1, build: 'humanoid',
   },
   runner: {
     kind: 'runner', name: 'SPRINTER', health: 0.82, tint: [1.14, 0.92, 0.88], scale: 0.94,
-    lean: 0.1, bodyArmour: 1, range: 0, burst: 0,
+    lean: 0.1, bodyArmour: 1, range: 0, burst: 0, score: 1, build: 'humanoid',
   },
   brute: {
     kind: 'brute', name: 'BRUTE', health: 2.4, tint: [1.12, 0.7, 0.64], scale: 1.32,
-    lean: 0, bodyArmour: 0.85, range: 0, burst: 0,
+    lean: 0, bodyArmour: 0.85, range: 0, burst: 0, score: 1, build: 'humanoid',
   },
   hound: {
     kind: 'hound', name: 'HELLHOUND', health: 1, tint: [1, 1, 1], scale: 1,
-    lean: 0, bodyArmour: 1, range: 0, burst: 0,
+    lean: 0, bodyArmour: 1, range: 0, burst: 0, score: 1, build: 'hound',
   },
   crawler: {
     kind: 'crawler', name: 'CRAWLER', health: 0.55, tint: [0.8, 0.94, 0.76], scale: 0.96,
-    lean: 1.15, bodyArmour: 1, range: 0, burst: 0,
+    lean: 1.15, bodyArmour: 1, range: 0, burst: 0, score: 1, build: 'humanoid',
   },
   armoured: {
     kind: 'armoured', name: 'ARMOURED', health: 2.1, tint: [0.7, 0.84, 1.08], scale: 1.08,
-    lean: 0, bodyArmour: 0.4, range: 0, burst: 0,
+    lean: 0, bodyArmour: 0.4, range: 0, burst: 0, score: 1, build: 'humanoid',
   },
   spitter: {
     kind: 'spitter', name: 'SPITTER', health: 1.15, tint: [0.7, 1.28, 0.68], scale: 1.02,
-    lean: 0, bodyArmour: 1, range: 17, burst: 0,
+    lean: 0, bodyArmour: 1, range: 17, burst: 0, score: 1, build: 'humanoid',
   },
   bomber: {
     kind: 'bomber', name: 'BLOATER', health: 0.9, tint: [1.22, 1.18, 0.58], scale: 1.16,
-    lean: 0, bodyArmour: 1, range: 0, burst: 7.5,
+    lean: 0, bodyArmour: 1, range: 0, burst: 7.5, score: 1, build: 'humanoid',
+  },
+  tank: {
+    kind: 'tank', name: 'TANK', health: 5.5, tint: [0.82, 0.68, 0.6], scale: 1.34,
+    lean: 0.14, bodyArmour: 0.6, range: 0, burst: 0, score: 4, build: 'tank',
   },
 };
 
@@ -112,6 +125,16 @@ export const MAX_THREAT = 3;
 export function enemyHealth(round: number, threat = 0): number {
   const base = round <= 9 ? 50 + round * 100 : 950 * Math.pow(1.1, round - 9);
   return Math.round(base * (1 + 0.2 * threat));
+}
+
+/**
+ * How well the horde works together, 0 to 1. The first couple of rounds are the
+ * dumb straight line at you the game has always had; from there they start
+ * splitting off to come round the sides and to get in front of you, and a
+ * chapter that is already trying harder to kill you gets there sooner.
+ */
+export function hordeCunning(round: number, threat = 0): number {
+  return Math.max(0, Math.min(1, (round - 2) / 8 + threat * 0.12));
 }
 
 /** Hound rounds are short and sharp. */
@@ -163,13 +186,17 @@ export function enemySpeed(round: number, kind: EnemyKind, threat = 0): number {
       return (3.0 + ramp * 0.5) * quicker;
     case 'bomber':
       return (3.7 + ramp * 0.7) * quicker;
+    case 'tank':
+      // The slowest thing on the map. You can walk away from one; the trick is
+      // that by the time it arrives the rest of the horde has you standing still.
+      return (2.2 + ramp * 0.3) * quicker;
   }
 }
 
 export function enemyDamage(kind: EnemyKind, threat = 0): number {
   const base = {
     walker: 32, runner: 34, brute: 58, hound: 28,
-    crawler: 26, armoured: 40, spitter: 22, bomber: 30,
+    crawler: 26, armoured: 40, spitter: 22, bomber: 30, tank: 88,
   }[kind];
   return Math.round(base * (1 + 0.1 * threat));
 }
@@ -196,8 +223,10 @@ export function roundMix(round: number, threat = 0): { kind: EnemyKind; weight: 
   const spitter = ramp(6, 0.022, 0.08);
   const armoured = ramp(7, 0.022, 0.09);
   const brute = ramp(8, 0.025, 0.11);
-  // Those caps come to 0.83, so there are always shamblers in the crowd.
-  const walker = 1 - runner - crawler - bomber - spitter - armoured - brute;
+  // Tanks stay rare however late it gets: two at once is a bad afternoon.
+  const tank = ramp(10, 0.014, 0.055);
+  // Those caps come to 0.885, so there are always shamblers in the crowd.
+  const walker = 1 - runner - crawler - bomber - spitter - armoured - brute - tank;
   return [
     { kind: 'walker', weight: walker },
     { kind: 'runner', weight: runner },
@@ -206,6 +235,7 @@ export function roundMix(round: number, threat = 0): { kind: EnemyKind; weight: 
     { kind: 'spitter', weight: spitter },
     { kind: 'armoured', weight: armoured },
     { kind: 'brute', weight: brute },
+    { kind: 'tank', weight: tank },
   ];
 }
 
@@ -233,7 +263,11 @@ export const SCORE_REPAIR = 10;
 
 export type KillKind = 'body' | 'head' | 'melee' | 'explosive';
 
-export function scoreForKill(kind: KillKind, doublePoints: boolean): number {
+/**
+ * What a kill pays. `multiplier` is the dead thing's own worth from
+ * `ENEMY_INFO.score`: one for the rank and file, four for a tank.
+ */
+export function scoreForKill(kind: KillKind, doublePoints: boolean, multiplier = 1): number {
   let base: number;
   switch (kind) {
     case 'head':
@@ -248,7 +282,7 @@ export function scoreForKill(kind: KillKind, doublePoints: boolean): number {
     default:
       base = SCORE_KILL;
   }
-  return doublePoints ? base * 2 : base;
+  return Math.round(base * multiplier) * (doublePoints ? 2 : 1);
 }
 
 export function scoreForHit(doublePoints: boolean): number {

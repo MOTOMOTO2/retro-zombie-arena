@@ -1,10 +1,16 @@
 /**
  * Collision + navigation over the tile grid.
  *
- * Zombie pathing uses a breadth-first flow field rebuilt from the player's tile
- * a few times a second. With a 48x40 grid that is ~1900 cells, so a full rebuild
- * is cheaper than running A* per zombie and it gives a whole horde perfect,
- * identical routing - which is exactly the arcade behaviour we want.
+ * Zombie pathing uses a flow field rebuilt from a goal tile a few times a
+ * second. A full rebuild over the 96x96 grid is cheaper than running A* per
+ * zombie and it gives a whole horde perfect, identical routing - which is
+ * exactly the arcade behaviour we want.
+ *
+ * The grid keeps several fields at once, one per slot. The horde uses that to
+ * chase from more than one direction: one field to the player, one to either
+ * flank and one to the ground ahead of where they are running. Slots are
+ * rebuilt round-robin and a rebuild is skipped outright when that slot's goal
+ * tile has not moved.
  *
  * On top of the tiles sits an obstacle layer: axis-aligned boxes on the floor
  * for everything solid that is smaller than a tile - perk machines, the
@@ -15,10 +21,13 @@
  * boxes that touch the tiles the body overlaps; the handful that move (the
  * mystery boxes) live in a short list that is scanned in full.
  *
- * The flow field deliberately ignores obstacles. They are all far smaller than
- * the rooms they stand in, the push-out slides a body along them, and the
- * enemy's own stuck detection shoulders it sideways - which is much cheaper
- * than a sub-tile navigation mesh and, in an arcade arena, reads the same.
+ * Those obstacles also feed a per-tile fill map: how much of each tile the
+ * furniture takes up, sampled on a 4x4 lattice and padded by roughly half a
+ * body. A full tile costs seven times a clear one to walk through, so the field
+ * is a small-integer Dijkstra (a dial of eight buckets, since no step costs
+ * more than seven) rather than a plain breadth-first search. The horde
+ * therefore routes *around* the furniture instead of grinding into the side of
+ * a crate and waiting for the push-out to shuffle it free.
  */
 
 import {
@@ -61,16 +70,43 @@ const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
   [0, -1],
 ];
 
+/** How many flow fields the grid holds at once. The horde runs one per goal. */
+export const FIELD_SLOTS = 4;
+
+/**
+ * Walking cost of a tile by how full of furniture it is: clear, part full,
+ * near enough solid. Nothing is ever *impassable* on account of furniture - a
+ * crate dumped in a doorway must never seal a room off - it just costs more.
+ */
+const FILL_COST = [1, 4, 7] as const;
+/** The dial needs one bucket per distinct distance in flight: max cost + 1. */
+const DIAL = 8;
+const DIAL_MASK = DIAL - 1;
+/** Obstacles are padded by about half a body before their fill is measured. */
+const FILL_PAD = 0.45;
+/** Sample offsets across a tile, as fractions of its width. */
+const FILL_SAMPLES = [0.125, 0.375, 0.625, 0.875] as const;
+/** Out of sixteen samples: this many is part full, this many is near solid. */
+const FILL_PART = 3;
+const FILL_MOST = 8;
+
 export class NavGrid {
   readonly base: Uint8Array;
   /** Live tile state: doors flip to floor when bought, barricades when torn. */
   readonly tiles: Uint8Array;
 
-  private readonly dist: Int32Array;
-  private readonly flowX: Int8Array;
-  private readonly flowZ: Int8Array;
-  private readonly queue: Int32Array;
-  private fieldOrigin = -1;
+  private readonly dist: Int32Array[] = [];
+  private readonly flowX: Int8Array[] = [];
+  private readonly flowZ: Int8Array[] = [];
+  private readonly fieldOrigin: number[] = [];
+  /** Dijkstra's dial, reused between rebuilds so pathing never allocates. */
+  private readonly dial: number[][] = [];
+
+  /** How full of furniture each tile is: 0 clear, 1 part full, 2 near solid. */
+  private readonly fill: Uint8Array;
+  private fillDirty = true;
+  /** Scratch counter for the fill pass: samples covered, per tile. */
+  private readonly covered: Uint8Array;
 
   /** Solid boxes that never move, bucketed by the tiles they touch. */
   private readonly obstacles: Obstacle[] = [];
@@ -84,10 +120,16 @@ export class NavGrid {
   constructor(base: Uint8Array) {
     this.base = base;
     this.tiles = Uint8Array.from(base);
-    this.dist = new Int32Array(MAP_W * MAP_H);
-    this.flowX = new Int8Array(MAP_W * MAP_H);
-    this.flowZ = new Int8Array(MAP_W * MAP_H);
-    this.queue = new Int32Array(MAP_W * MAP_H);
+    const cells = MAP_W * MAP_H;
+    for (let s = 0; s < FIELD_SLOTS; s++) {
+      this.dist.push(new Int32Array(cells));
+      this.flowX.push(new Int8Array(cells));
+      this.flowZ.push(new Int8Array(cells));
+      this.fieldOrigin.push(-1);
+    }
+    for (let i = 0; i < DIAL; i++) this.dial.push([]);
+    this.fill = new Uint8Array(cells);
+    this.covered = new Uint8Array(cells);
   }
 
   idx(tx: number, tz: number): number {
@@ -106,7 +148,7 @@ export class NavGrid {
   set(tx: number, tz: number, value: number): void {
     if (!this.inBounds(tx, tz)) return;
     this.tiles[tz * MAP_W + tx] = value;
-    this.fieldOrigin = -1; // topology changed, force a flow-field rebuild
+    this.invalidateField(); // topology changed, force a flow-field rebuild
   }
 
   /* ------------------------------------------------------------ obstacles */
@@ -120,6 +162,7 @@ export class NavGrid {
     const i = this.obstacles.length;
     this.obstacles.push(o);
     this.seen.push(-1);
+    this.obstaclesChanged();
     const tx0 = Math.floor((x - hx) / TILE);
     const tx1 = Math.floor((x + hx) / TILE);
     const tz0 = Math.floor((z - hz) / TILE);
@@ -140,6 +183,7 @@ export class NavGrid {
   addMover(x: number, z: number, hx: number, hz: number): Obstacle {
     const o: Obstacle = { x, z, hx, hz, active: true };
     this.movers.push(o);
+    this.obstaclesChanged();
     return o;
   }
 
@@ -148,10 +192,69 @@ export class NavGrid {
     this.seen.length = 0;
     this.movers.length = 0;
     this.buckets.clear();
+    this.obstaclesChanged();
+  }
+
+  /**
+   * Call after a mover has been picked up and put down somewhere else: the fill
+   * map is remeasured on the next path query and every field is rebuilt.
+   */
+  obstaclesChanged(): void {
+    this.fillDirty = true;
+    this.invalidateField();
   }
 
   get obstacleCount(): number {
     return this.obstacles.length;
+  }
+
+  /**
+   * Remeasures how much of every tile the furniture fills. Walks the obstacles
+   * rather than the tiles, so the cost is a handful of point tests per box
+   * instead of a sweep of the whole map.
+   */
+  private refreshFill(): void {
+    this.fillDirty = false;
+    this.covered.fill(0);
+    const mark = (o: Obstacle): void => {
+      if (!o.active) return;
+      const x0 = o.x - o.hx - FILL_PAD;
+      const x1 = o.x + o.hx + FILL_PAD;
+      const z0 = o.z - o.hz - FILL_PAD;
+      const z1 = o.z + o.hz + FILL_PAD;
+      const tx0 = Math.floor(x0 / TILE);
+      const tx1 = Math.floor(x1 / TILE);
+      const tz0 = Math.floor(z0 / TILE);
+      const tz1 = Math.floor(z1 / TILE);
+      for (let tz = tz0; tz <= tz1; tz++) {
+        for (let tx = tx0; tx <= tx1; tx++) {
+          if (!this.inBounds(tx, tz)) continue;
+          let hits = 0;
+          for (const fz of FILL_SAMPLES) {
+            const sz = (tz + fz) * TILE;
+            if (sz < z0 || sz > z1) continue;
+            for (const fx of FILL_SAMPLES) {
+              const sx = (tx + fx) * TILE;
+              if (sx >= x0 && sx <= x1) hits++;
+            }
+          }
+          if (hits) this.covered[this.idx(tx, tz)] = Math.min(16, this.covered[this.idx(tx, tz)] + hits);
+        }
+      }
+    };
+    for (const o of this.obstacles) mark(o);
+    for (const o of this.movers) mark(o);
+    for (let i = 0; i < this.fill.length; i++) {
+      const c = this.covered[i];
+      this.fill[i] = c >= FILL_MOST ? 2 : c >= FILL_PART ? 1 : 0;
+    }
+  }
+
+  /** How full of furniture a tile is: 0 clear, 1 part full, 2 near solid. */
+  fillAt(tx: number, tz: number): number {
+    if (!this.inBounds(tx, tz)) return 2;
+    if (this.fillDirty) this.refreshFill();
+    return this.fill[tz * MAP_W + tx];
   }
 
   /** True when a body of this radius standing here would be inside something solid. */
@@ -359,68 +462,134 @@ export class NavGrid {
   }
 
   /**
-   * Rebuilds the BFS flow field toward a goal tile. Returns false when the goal
-   * is not walkable, in which case the previous field is left intact.
+   * Rebuilds one slot's flow field toward a goal tile. Returns false when the
+   * goal is not walkable, in which case the slot is left as it was.
+   *
+   * Costs are the small integers in FILL_COST, so this is Dijkstra on a dial:
+   * everything still in flight sits within `DIAL - 1` of the distance being
+   * processed, which is exactly what a ring of that many buckets holds.
    */
-  buildFlowField(goalTx: number, goalTz: number, tornBarricades: Set<number>): boolean {
+  buildFlowField(
+    goalTx: number, goalTz: number, tornBarricades: Set<number>, slot = 0,
+  ): boolean {
+    if (slot < 0 || slot >= FIELD_SLOTS) return false;
     if (!this.inBounds(goalTx, goalTz)) return false;
     if (this.solidForZombie(goalTx, goalTz, tornBarricades)) return false;
+    if (this.fillDirty) this.refreshFill();
 
     const goal = this.idx(goalTx, goalTz);
-    if (goal === this.fieldOrigin) return true;
+    if (goal === this.fieldOrigin[slot]) return true;
 
-    this.dist.fill(-1);
-    this.flowX.fill(0);
-    this.flowZ.fill(0);
+    const dist = this.dist[slot];
+    const flowX = this.flowX[slot];
+    const flowZ = this.flowZ[slot];
+    dist.fill(-1);
+    flowX.fill(0);
+    flowZ.fill(0);
+    for (const bucket of this.dial) bucket.length = 0;
 
-    const q = this.queue;
-    let head = 0;
-    let tail = 0;
-    q[tail++] = goal;
-    this.dist[goal] = 0;
+    dist[goal] = 0;
+    this.dial[0].push(goal);
+    let pending = 1;
 
-    while (head < tail) {
-      const cur = q[head++];
-      const cx = cur % MAP_W;
-      const cz = (cur / MAP_W) | 0;
-      const nd = this.dist[cur] + 1;
+    for (let d = 0; pending > 0; d++) {
+      const bucket = this.dial[d & DIAL_MASK];
+      while (bucket.length) {
+        const cur = bucket.pop() as number;
+        pending--;
+        // A cheaper route to this tile turned up after it was queued.
+        if (dist[cur] !== d) continue;
+        const cx = cur % MAP_W;
+        const cz = (cur / MAP_W) | 0;
 
-      for (const [dx, dz] of NEIGHBOURS) {
-        const nxt = cx + dx;
-        const nzt = cz + dz;
-        if (!this.inBounds(nxt, nzt)) continue;
-        const ni = nzt * MAP_W + nxt;
-        if (this.dist[ni] !== -1) continue;
-        if (this.solidForZombie(nxt, nzt, tornBarricades)) continue;
-        this.dist[ni] = nd;
-        // Point back the way we came: that is the direction of travel.
-        this.flowX[ni] = -dx;
-        this.flowZ[ni] = -dz;
-        q[tail++] = ni;
+        for (const [dx, dz] of NEIGHBOURS) {
+          const nxt = cx + dx;
+          const nzt = cz + dz;
+          if (!this.inBounds(nxt, nzt)) continue;
+          const ni = nzt * MAP_W + nxt;
+          if (this.solidForZombie(nxt, nzt, tornBarricades)) continue;
+          const nd = d + FILL_COST[this.fill[ni]];
+          const was = dist[ni];
+          if (was >= 0 && was <= nd) continue;
+          dist[ni] = nd;
+          // Point back the way we came: that is the direction of travel.
+          flowX[ni] = -dx;
+          flowZ[ni] = -dz;
+          this.dial[nd & DIAL_MASK].push(ni);
+          pending++;
+        }
       }
     }
 
-    this.fieldOrigin = goal;
+    this.fieldOrigin[slot] = goal;
     return true;
   }
 
   /** Forces the next buildFlowField call to recompute even for the same goal. */
   invalidateField(): void {
-    this.fieldOrigin = -1;
+    for (let s = 0; s < FIELD_SLOTS; s++) this.fieldOrigin[s] = -1;
   }
 
   /** Step direction toward the goal from a tile, or null if unreachable. */
-  flowAt(tx: number, tz: number): { dx: number; dz: number; dist: number } | null {
+  flowAt(tx: number, tz: number, slot = 0): { dx: number; dz: number; dist: number } | null {
     if (!this.inBounds(tx, tz)) return null;
     const i = tz * MAP_W + tx;
-    if (this.dist[i] < 0) return null;
-    return { dx: this.flowX[i], dz: this.flowZ[i], dist: this.dist[i] };
+    const dist = this.dist[slot];
+    if (dist[i] < 0) return null;
+    return { dx: this.flowX[slot][i], dz: this.flowZ[slot][i], dist: dist[i] };
   }
 
-  /** Tile distance to the flow-field goal, or -1 when unreachable. */
-  distanceAt(tx: number, tz: number): number {
+  /** Path cost to the flow-field goal, or -1 when unreachable. */
+  distanceAt(tx: number, tz: number, slot = 0): number {
     if (!this.inBounds(tx, tz)) return -1;
-    return this.dist[tz * MAP_W + tx];
+    return this.dist[slot][tz * MAP_W + tx];
+  }
+
+  /**
+   * The nearest tile to (tx, tz) a body could actually stand in, searched
+   * outward in rings. Furniture is avoided if there is anywhere clear to go and
+   * tolerated if there is not. Null when the whole neighbourhood is walled in.
+   */
+  nearestOpen(
+    tx: number, tz: number, tornBarricades: Set<number>, rings = 5,
+  ): { tx: number; tz: number } | null {
+    let fallback: { tx: number; tz: number } | null = null;
+    for (let r = 0; r <= rings; r++) {
+      for (let dz = -r; dz <= r; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          // Only the shell of each ring: the inside was covered already.
+          if (r > 0 && Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          const nx = tx + dx;
+          const nz = tz + dz;
+          if (!this.inBounds(nx, nz)) continue;
+          if (this.solidForZombie(nx, nz, tornBarricades)) continue;
+          if (this.fillAt(nx, nz) < 2) return { tx: nx, tz: nz };
+          fallback ??= { tx: nx, tz: nz };
+        }
+      }
+    }
+    return fallback;
+  }
+
+  /**
+   * Line of sight that also refuses to cut through furniture. A body uses this
+   * to decide whether it can walk straight somewhere; bullets and eyes use
+   * plain `lineOfSight`, because you can see and shoot over a crate.
+   */
+  clearWalk(x0: number, z0: number, x1: number, z1: number): boolean {
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.01) return this.fillAt(Math.floor(x0 / TILE), Math.floor(z0 / TILE)) < 2;
+    if (!this.lineOfSight(x0, z0, x1, z1)) return false;
+    const steps = Math.max(1, Math.ceil(d / (TILE * 0.5)));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const tx = Math.floor((x0 + dx * t) / TILE);
+      const tz = Math.floor((z0 + dz * t) / TILE);
+      if (this.fillAt(tx, tz) >= 2) return false;
+    }
+    return true;
   }
 
   /** Flood fill of everything reachable on foot from a tile. Used by tests. */

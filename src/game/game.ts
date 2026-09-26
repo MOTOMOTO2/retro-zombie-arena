@@ -12,9 +12,10 @@ import { Rng } from '../core/rng.ts';
 import { RetroPipeline, type RetroQuality } from '../core/retro.ts';
 import { ParticleField, applyLight, flatMaterial } from '../gfx/models.ts';
 import { textures } from '../gfx/textures.ts';
-import { NavGrid } from '../world/grid.ts';
+import { NavGrid, type Obstacle } from '../world/grid.ts';
 import { buildLevel, lookAt, type BuiltLevel } from '../world/build.ts';
 import { dressLevel } from '../world/dressing.ts';
+import type { Solid } from '../world/furnish.ts';
 import { MAPS } from '../world/maps.ts';
 import {
   MAP_W,
@@ -35,24 +36,33 @@ import {
   BarricadeProp,
   DoorProp,
   PerkMachine,
+  TrapProp,
   WallBuy,
   buildProps,
   disposeProps,
   propGroups,
+  propSolids,
   type PropSet,
 } from '../world/props.ts';
 import { Enemy, EnemyPool, rayHitsEnemy } from './enemy.ts';
 import { Hud, type MinimapBlip } from './hud.ts';
 import { EYE_HEIGHT, Player } from './player.ts';
 import {
+  BOMBER_DAMAGE,
+  BOMBER_SPLASH,
   CARPENTER_SCORE,
   DROPS_PER_ROUND,
   DROP_CHANCE,
   DROP_MIN_GAP,
+  ENEMY_INFO,
   MYSTERY_BOX_COST,
   NUKE_SCORE,
   PERK_INFO,
+  TRAP_COOLDOWN,
+  TRAP_COST,
+  TRAP_SECONDS,
   enemyHealth,
+  healthFor,
   houndHealth,
   POWERUPS,
   POWERUP_IDS,
@@ -62,6 +72,7 @@ import {
   roundBonus,
   scoreForHit,
   scoreForKill,
+  trapDamage,
   type EnemyKind,
   type PowerUpId,
   type SpawnPlan,
@@ -204,8 +215,11 @@ export class Game {
   private hazardHurt = 0;
   /** Radio lines waiting for their moment, by run time. */
   private readonly radioQueue: { at: number; text: string }[] = [];
-  private readonly tmpTarget = new THREE.Vector3();
   private readonly boxes: BoxController;
+  /** One handle per mystery box in the collision grid; they move, so they are tracked. */
+  private boxSolids: Obstacle[] = [];
+  /** Bloaters that went down this frame and have yet to go off. */
+  private readonly bursts: { x: number; z: number; radius: number }[] = [];
   private readonly elements = new ElementFX();
   /** How many mystery boxes this map runs at once. */
   private boxCount = 1;
@@ -428,7 +442,9 @@ export class Game {
     this.layout = generateLayout(seed, profile);
     this.boxCount = profile.boxes;
     this.grid = new NavGrid(this.layout.tiles);
-    this.level = buildLevel(this.layout, dressLevel(this.layout));
+    // The set dressing reports what it puts on the floor as it is built.
+    const solids: Solid[] = [];
+    this.level = buildLevel(this.layout, dressLevel(this.layout, solids));
     this.scene.add(this.level.group);
     this.props = buildProps(this.layout, this.level.probe);
     for (const g of propGroups(this.props)) this.scene.add(g);
@@ -442,6 +458,16 @@ export class Game {
     }, this.level.probe);
     for (const g of questGroups(this.questProps)) this.scene.add(g);
     this.boxes.reset(this.layout.boxPads, this.boxCount);
+
+    // Everything solid, into the collision grid: the furniture, the machines,
+    // the trap pylons, the workbench, and one moving box per mystery box.
+    for (const s of solids) this.grid.addObstacle(s.x, s.z, s.hx, s.hz);
+    for (const s of propSolids(this.props)) this.grid.addObstacle(s.x, s.z, s.hx, s.hz);
+    const bench = this.questProps.bench.footprint;
+    this.grid.addObstacle(bench.x, bench.z, bench.hx, bench.hz);
+    this.boxSolids = this.boxes.units.map((u) => this.grid.addMover(u.prop.center.x, u.prop.center.z, 1.2, 0.9));
+    this.syncBoxSolids();
+
     const look = lookAt(this.layout, this.layout.spawnZone);
     this.fog.color.set(look.fog);
     this.fog.near = look.outdoor ? FOG_OUTDOOR[0] : FOG_INDOOR[0];
@@ -528,11 +554,14 @@ export class Game {
     this.dropsThisRound = 0;
     this.runSeconds = 0;
     this.boxes.reset(this.layout.boxPads, this.boxCount);
+    this.syncBoxSolids();
     this.elements.reset();
     this.modCooldown = 0;
     this.props.pack.showWeapon(null);
     this.props.pack.setPowered(false);
     this.props.power.setOn(false);
+    for (const t of this.props.traps) t.reset();
+    this.bursts.length = 0;
     for (const m of this.props.machines) {
       m.setPowered(false);
       m.bought = false;
@@ -678,7 +707,8 @@ export class Game {
       x: barricade.center.x + barricade.def.dx * TILE * 2.0,
       z: barricade.center.z + barricade.def.dz * TILE * 2.0,
     };
-    enemy.spawn(kind, outside.x, outside.z, this.plan.health, this.round, barricade, this.rng, this.quest.threat);
+    const health = healthFor(kind, this.round, this.quest.threat);
+    enemy.spawn(kind, outside.x, outside.z, health, this.round, barricade, this.rng, this.quest.threat);
     this.spawned++;
   }
 
@@ -1230,9 +1260,116 @@ export class Game {
     this.hud.setPoints(this.player.points);
     if (e.isBoss) this.onBossKilled(e);
     else {
+      if (e.burst > 0 && !res.shattered) this.bursts.push({ x: e.x, z: e.z, radius: e.burst });
       this.maybeDropPowerUp(e.x, e.z);
       this.feedStation(e);
     }
+  }
+
+
+  /* ----------------------------------------------------------------- traps */
+
+  /**
+   * Traps: a lever on the wall, a pylon either side of it, and the floor
+   * between them. Pay, and for half a minute anything that walks into that
+   * floor is cooked - then it has to cool down before it will take your money
+   * again. They cost a thousand and they kill on the round's own terms, so a
+   * trap is a choke point you can buy rather than a weapon that falls behind.
+   */
+  private updateTraps(dt: number): void {
+    const perSecond = trapDamage(Math.max(1, this.round), this.quest.threat);
+    for (const t of this.props.traps) {
+      if (t.update(dt, TRAP_COOLDOWN)) {
+        audio.deny();
+        if (this.near(t.center)) this.hud.toast('THE TRAP CUTS OUT', '#b8b2a0', 1.6);
+      }
+      t.animate(this.elapsed);
+      if (!t.live) continue;
+
+      const shock = t.kind === 'shock';
+      if (this.rng.chance(dt * (shock ? 26 : 34))) {
+        if (shock) {
+          const [a, b] = t.emitters;
+          this.elements.bolt(a, b, 0x8fd8ff, 0.14);
+        } else {
+          for (const e of t.emitters) {
+            this.particles.spawn(
+              e.x, e.y, e.z,
+              (t.zone.x - e.x) * 0.5 + this.rng.range(-1, 1), this.rng.range(-2, 1), (t.zone.z - e.z) * 0.5 + this.rng.range(-1, 1),
+              FIRE_COLORS[this.rng.int(3)], this.rng.range(0.4, 0.8), -3,
+            );
+          }
+        }
+      }
+
+      this.pool.forEachLive((e) => {
+        if (!t.catches(e.x, e.z)) return;
+        // It cannot cook through a wall, however close the body looks.
+        if (!this.grid.lineOfSight(t.zone.x, t.zone.z, e.x, e.z)) return;
+        // Bosses walk through a trap; it just hurts.
+        const amount = perSecond * dt * (e.isBoss ? 0.2 : 1);
+        if (!e.isBoss) {
+          if (shock) e.shocked = Math.max(e.shocked, 0.3);
+          else this.ignite(e, 2.6);
+        }
+        this.damageEnemy(e, amount, false, false, new THREE.Vector3(e.x, e.y + 2, e.z), t.zone, { quiet: true });
+        if (this.rng.chance(dt * 12)) {
+          this.particles.spawn(
+            e.x + this.rng.range(-0.5, 0.5), e.y + this.rng.range(0.4, 2.4), e.z + this.rng.range(-0.5, 0.5),
+            this.rng.range(-1, 1), this.rng.range(1, 4), this.rng.range(-1, 1),
+            shock ? SPARK_BLUE : FIRE_COLORS[this.rng.int(3)], this.rng.range(0.25, 0.6), shock ? 6 : -2,
+          );
+        }
+      });
+    }
+  }
+
+  /** Close enough to the player for a message about it to make sense. */
+  private near(at: { x: number; z: number }, range = 26): boolean {
+    return Math.hypot(at.x - this.player.x, at.z - this.player.z) < range;
+  }
+
+  private buyTrap(t: TrapProp): void {
+    if (!t.powered || t.state !== 'ready') {
+      audio.deny();
+      return;
+    }
+    if (!this.player.spend(TRAP_COST)) {
+      audio.deny();
+      return;
+    }
+    t.fire(TRAP_SECONDS);
+    audio.doorOpen({ x: t.center.x, z: t.center.z });
+    this.finishPurchase(TRAP_COST, t.kind === 'shock' ? 'ELECTRO-SHOCK DEFENCES' : 'FLAME VENTS');
+  }
+
+  /**
+   * A bloater going off: a gas burst that guts the crowd around it, leaves the
+   * floor bubbling and takes a bite out of anyone standing too close. Bloaters
+   * caught in one go on the queue and burst the following frame, so a packed
+   * room goes off in a ragged chain rather than all at once.
+   */
+  private bomberBurst(x: number, z: number, radius: number): void {
+    audio.explosion({ x, z });
+    this.shake = Math.max(this.shake, this.near({ x, z }, radius * 2) ? 2.2 : 0);
+    for (let i = 0; i < 30; i++) {
+      const a = this.rng.range(0, Math.PI * 2);
+      const s = this.rng.range(3, 12);
+      this.particles.spawn(x, 1.2, z, Math.cos(a) * s, this.rng.range(1, 9), Math.sin(a) * s,
+        ACID_COLOR, this.rng.range(0.4, 1.1), 16);
+    }
+    this.pool.forEachLive((e) => {
+      const d = Math.hypot(e.x - x, e.z - z);
+      if (d > radius || !this.grid.lineOfSight(x, z, e.x, e.z)) return;
+      const falloff = 1 - d / radius;
+      this.damageEnemy(e, BOMBER_SPLASH * falloff, false, true, new THREE.Vector3(e.x, e.headY, e.z), { x, z });
+    });
+    const pd = Math.hypot(this.player.x - x, this.player.z - z);
+    if (pd < radius && this.player.alive) {
+      this.hurtPlayer(Math.round(BOMBER_DAMAGE * (1 - pd / radius)), { x, z });
+      this.knockPlayer(x, z, 6);
+    }
+    this.groundHazard('acid', x, z, radius * 0.45, 14, 4);
   }
 
   /** A kill inside the ring while the station is hungry: its soul flies in. */
@@ -1574,7 +1711,6 @@ export class Game {
     audio.stopMusic();
     audio.victory();
     this.hud.clearRadio();
-    this.hud.setWaypoint(null);
     this.hud.setBoss(null);
     this.hud.setPrompt(null);
     this.retro.setTint(0xffffff, 0.5);
@@ -1889,9 +2025,16 @@ export class Game {
     const d = Math.hypot(this.player.x - x, this.player.z - z);
     if (d < 4.2 && this.player.y < y + 3) this.hurtPlayer(Math.round(30 * (1 - (d / 4.2) * 0.6)), { x, z });
     // Whatever lands leaves the ground burning or bubbling for a while.
-    const radius = fire ? 3.4 : 3.0;
+    if (fire) this.groundHazard('fireball', x, z, 3.4, 24, 4.5);
+    else this.groundHazard('acid', x, z, 3.0, 18, 6);
+  }
+
+  /** A patch of burning or bubbling floor that hurts anyone standing in it. */
+  private groundHazard(
+    kind: 'fireball' | 'acid', x: number, z: number, radius: number, dps: number, life: number,
+  ): void {
     const mat = new THREE.MeshBasicMaterial({
-      color: fire ? new THREE.Color(2.6, 0.9, 0.15) : new THREE.Color(0.4, 2.0, 0.5),
+      color: kind === 'fireball' ? new THREE.Color(2.6, 0.9, 0.15) : new THREE.Color(0.4, 2.0, 0.5),
       transparent: true, opacity: 0.75, depthWrite: false, blending: THREE.AdditiveBlending,
     });
     const mesh = new THREE.Mesh(this.hazardGeo, mat);
@@ -1899,7 +2042,7 @@ export class Game {
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(x, 0.07, z);
     this.scene.add(mesh);
-    this.hazards.push({ mesh, kind: s.kind, x, z, radius, dps: fire ? 24 : 18, life: fire ? 4.5 : 6 });
+    this.hazards.push({ mesh, kind, x, z, radius, dps, life });
   }
 
   private updateHazards(dt: number): void {
@@ -1938,90 +2081,6 @@ export class Game {
     this.hazards.length = 0;
     this.hazardHurt = 0;
     this.bossLight.intensity = 0;
-  }
-
-  /** Where the objective marker points: the next thing the story needs. */
-  private objectiveTarget(): THREE.Vector3 | null {
-    const q = this.quest;
-    switch (q.stage) {
-      case 'power':
-        return this.tmpTarget.copy(this.props.power.center);
-      case 'parts': {
-        let best: THREE.Vector3 | null = null;
-        let bestD = Infinity;
-        for (const part of this.questProps.parts) {
-          if (part.taken) continue;
-          const d = Math.hypot(part.center.x - this.player.x, part.center.z - this.player.z);
-          if (d < bestD) {
-            bestD = d;
-            best = part.center;
-          }
-        }
-        return best ? this.tmpTarget.copy(best) : null;
-      }
-      case 'valves': {
-        let best: THREE.Vector3 | null = null;
-        let bestD = Infinity;
-        for (const v of this.questProps.valves) {
-          if (v.open) continue;
-          const d = Math.hypot(v.center.x - this.player.x, v.center.z - this.player.z);
-          if (d < bestD) {
-            bestD = d;
-            best = v.center;
-          }
-        }
-        return best ? this.tmpTarget.copy(best) : null;
-      }
-      case 'build':
-      case 'harvest':
-      case 'defend':
-        return this.tmpTarget.copy(this.questProps.bench.center);
-      case 'boss': {
-        const b = this.pool.boss;
-        if (!b || !b.active || b.state === 'dead' || b.state === 'approach') return null;
-        return this.tmpTarget.set(b.x, b.headY + 1.2, b.z);
-      }
-      case 'escape':
-        return this.tmpTarget.copy(this.questProps.exit.center);
-      default:
-        return null;
-    }
-  }
-
-  /** Puts the objective marker on screen, or pins it to the edge pointing the way. */
-  private updateWaypoint(): void {
-    const t = this.objectiveTarget();
-    if (!t || !this.player.alive || this.state !== 'playing') {
-      this.hud.setWaypoint(null);
-      return;
-    }
-    const dist = Math.hypot(t.x - this.player.x, t.z - this.player.z);
-    if (dist < 4.5) {
-      this.hud.setWaypoint(null);
-      return;
-    }
-    this.camera.updateMatrixWorld();
-    const v = this.tmpV.copy(t).applyMatrix4(this.camera.matrixWorldInverse);
-    const behind = v.z > -0.5;
-    let sx: number;
-    let sy: number;
-    if (behind) {
-      // Behind the camera: slide it round to the edge on the side it is on.
-      sx = v.x;
-      sy = -Math.abs(v.y) - Math.abs(v.z) * 0.3;
-    } else {
-      v.applyMatrix4(this.camera.projectionMatrix);
-      sx = v.x;
-      sy = v.y;
-    }
-    // Off screen it rides an ellipse inside the edges, clear of the HUD corners.
-    const k = Math.hypot(sx / 0.86, sy / 0.72);
-    const edge = behind || k > 1;
-    if (edge) {
-      sx /= Math.max(k, 1e-6);
-      sy /= Math.max(k, 1e-6);
-    }
-    this.hud.setWaypoint((sx * 0.5 + 0.5) * window.innerWidth, (-sy * 0.5 + 0.5) * window.innerHeight, dist / 2, edge);
   }
 
   /* --------------------------------------------------------- interaction */
@@ -2103,6 +2162,19 @@ export class Game {
         maxed ? 0 : papCost(tier),
         () => this.packWeapon(), 5.5,
       );
+    }
+
+    for (const t of this.props.traps) {
+      const name = t.kind === 'shock' ? 'ELECTRO-SHOCK DEFENCES' : 'FLAME VENTS';
+      if (!t.powered) {
+        consider(t.center.x, t.center.z, `${name} — NO POWER`, 0, () => audio.deny(), 5.2);
+      } else if (t.state === 'live') {
+        consider(t.center.x, t.center.z, `${name} — RUNNING  ${Math.ceil(t.timer)}s`, 0, () => {}, 5.2);
+      } else if (t.state === 'cooling') {
+        consider(t.center.x, t.center.z, `${name} — RECHARGING  ${Math.ceil(t.timer)}s`, 0, () => audio.deny(), 5.2);
+      } else {
+        consider(t.center.x, t.center.z, `SWITCH ON THE ${name}`, TRAP_COST, () => this.buyTrap(t), 5.2);
+      }
     }
 
     for (const u of this.boxes.units) {
@@ -2250,6 +2322,7 @@ export class Game {
   private turnOnPower(): void {
     this.props.power.setOn(true);
     for (const m of this.props.machines) m.setPowered(true);
+    for (const t of this.props.traps) t.setPowered(true);
     this.props.pack.setPowered(true);
     audio.doorOpen();
     audio.buy();
@@ -2371,6 +2444,7 @@ export class Game {
     this.updatePlayer(dt);
     this.updateRound(dt);
     this.updateEnemies(dt);
+    this.updateTraps(dt);
     this.updateQuest(dt);
     this.updateBossShots(dt);
     this.updateHazards(dt);
@@ -2403,7 +2477,6 @@ export class Game {
     if (this.state !== 'paused') this.hud.update(dt);
     if (this.state !== 'playing') return;
     this.updateHud();
-    this.updateWaypoint();
     this.tags.update(dt, this.camera, this.player, this.grid);
   }
 
@@ -2575,7 +2648,19 @@ export class Game {
           if (enemy.kind === 'hound') audio.bark({ x: enemy.x, z: enemy.z });
           else this.zombieSpeaks(enemy);
         },
+        (enemy, toX, toZ) => {
+          // A spitter, holding its ground and throwing bile.
+          this.lobShot('acid', enemy.x, enemy.headY - 0.2, enemy.z, toX + this.rng.range(-2, 2), toZ + this.rng.range(-2, 2));
+          audio.zombieVoice({ x: enemy.x, z: enemy.z }, 'scream', 1.25);
+        },
       );
+    }
+
+    // Bloaters that went down last frame go off now, and anything they kill
+    // waits its own turn, so a packed room bursts in a ragged chain.
+    if (this.bursts.length) {
+      const going = this.bursts.splice(0, this.bursts.length);
+      for (const b of going) this.bomberBurst(b.x, b.z, b.radius);
     }
 
     this.pool.resolveCrowding(this.grid, this.torn);
@@ -2602,6 +2687,13 @@ export class Game {
     for (const e of this.pool.all) {
       if (!e.active) continue;
       probe.sample(e.x, e.z, this.tmpLight);
+      // Each kind wears its own colour, so a crowd reads at a glance.
+      if (!e.isBoss) {
+        const tint = ENEMY_INFO[e.kind].tint;
+        this.tmpLight.r *= tint[0];
+        this.tmpLight.g *= tint[1];
+        this.tmpLight.b *= tint[2];
+      }
       if (e.frozen > 0) this.tmpLight.lerp(ICE_TINT, 0.7);
       if (e.burning > 0) this.tmpLight.lerp(FIRE_TINT, 0.35 + 0.15 * Math.sin(this.elapsed * 30 + e.x));
       if (e.shocked > 0) this.tmpLight.addScalar(Math.random() * 1.5);
@@ -2611,9 +2703,12 @@ export class Game {
     }
   }
 
-  /** Deeper for brutes, higher for runners, and never quite the same twice. */
+  /** Deeper for the big ones, higher for the quick ones, never twice the same. */
   private voicePitch(e: Enemy): number {
-    const base = e.kind === 'brute' ? 0.72 : e.kind === 'runner' ? 1.18 : 1;
+    const base = {
+      walker: 1, runner: 1.18, brute: 0.72, hound: 1,
+      crawler: 0.88, armoured: 0.78, spitter: 1.3, bomber: 0.68,
+    }[e.kind];
     return base * this.rng.range(0.9, 1.1);
   }
 
@@ -2732,6 +2827,21 @@ export class Game {
 
   private updateBox(dt: number): void {
     this.boxes.update(dt, this.elapsed);
+    this.syncBoxSolids();
+  }
+
+  /** Keeps each mystery box's solid box on the crate, and off while it flies. */
+  private syncBoxSolids(): void {
+    for (let i = 0; i < this.boxSolids.length; i++) {
+      const u = this.boxes.units[i];
+      const o = this.boxSolids[i];
+      const f = u.prop.footprint;
+      o.x = f.x;
+      o.z = f.z;
+      o.hx = f.hx;
+      o.hz = f.hz;
+      o.active = u.enabled && u.state !== 'away' && u.state !== 'leaving';
+    }
   }
 
   private updateProps(dt: number): void {
@@ -2871,9 +2981,8 @@ export class Game {
     }
 
     if (this.hud.mapVisible) {
+      // No objective marker: the map shows what you have found, not where to go.
       const blips: MinimapBlip[] = [];
-      const target = this.objectiveTarget();
-      if (target) blips.push({ x: target.x, z: target.z, color: '#7affd0', size: 2.2 });
       this.pool.forEachLive((e) =>
         blips.push({ x: e.x, z: e.z, color: e.kind === 'hound' ? '#ff6a2a' : '#d22f26' }),
       );
@@ -2885,6 +2994,13 @@ export class Game {
         blips.push({
           x: m.center.x, z: m.center.z,
           color: `#${PERK_INFO[m.id].color.toString(16).padStart(6, '0')}`,
+        });
+      }
+      for (const t of this.props.traps) {
+        if (!t.powered) continue;
+        blips.push({
+          x: t.center.x, z: t.center.z, size: 1.4,
+          color: t.live ? '#ffffff' : t.kind === 'shock' ? '#8fd8ff' : '#ff8a3a',
         });
       }
       for (const d of this.drops) {

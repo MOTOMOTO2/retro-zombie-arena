@@ -14,6 +14,12 @@
  * one that has been lost far away and out of sight for too long is recycled
  * back to a window near the player, so the horde never loses interest.
  *
+ * There are seven kinds of them, and they are not just numbers: each one is
+ * built out of the same body at its own size, tint and stoop, so a crowd reads
+ * at a glance. Crawlers drag along the floor with their head about a metre up,
+ * armoured bodies shrug off anything that is not a headshot, spitters stop
+ * short and throw bile, and bloaters burst when they go down.
+ *
  * Hits have weight: a spring-driven flinch away from the shot, a head snap on
  * headshots, a short stagger and a shove. Deaths are animated - thrown back,
  * pitched forward, buckling at the knees, or launched by an explosion - and the
@@ -25,7 +31,7 @@ import { NavGrid } from '../world/grid.ts';
 import { TILE, tileCenter, worldToTile } from '../world/mapdata.ts';
 import { buildHound, buildZombie, type Outfit, type ZombieModel } from '../gfx/models.ts';
 import { Rng } from '../core/rng.ts';
-import { enemyDamage, enemySpeed, type EnemyKind } from './rules.ts';
+import { ENEMY_INFO, enemyDamage, enemySpeed, type EnemyKind } from './rules.ts';
 import type { BarricadeProp } from '../world/props.ts';
 
 export type EnemyState = 'idle' | 'approach' | 'breach' | 'climb' | 'hunt' | 'attack' | 'dead';
@@ -76,6 +82,18 @@ export class Enemy {
   threat = 0;
   speed = 3;
   radius = 0.7;
+  /** How big this body is against the model it was built from. */
+  sizeScale = 1;
+  /** Forward pitch of the whole body: a crawler drags along at over a radian. */
+  lean = 0;
+  /** Body shots are multiplied by this; the head always takes the lot. */
+  bodyArmour = 1;
+  /** A spitter holds this far off and throws; everything else closes in. */
+  standoff = 0;
+  /** A bloater bursts this wide when it dies. */
+  burst = 0;
+  /** Seconds until this body can throw again. */
+  throwTimer = 0;
 
   state: EnemyState = 'idle';
   /** Barricade this enemy is coming through, if any. */
@@ -162,8 +180,15 @@ export class Enemy {
     this.y = 0;
     this.health = health;
     this.maxHealth = health;
+    const info = ENEMY_INFO[kind];
     this.speed = enemySpeed(round, kind, threat) * rng.range(0.9, 1.12);
-    this.radius = this.model.radius;
+    this.sizeScale = info.scale * rng.range(0.96, 1.05);
+    this.lean = info.lean;
+    this.bodyArmour = info.bodyArmour;
+    this.standoff = info.range;
+    this.burst = info.burst;
+    this.throwTimer = rng.range(1.2, 3);
+    this.radius = this.model.radius * (this.lean > 0.5 ? 0.85 : this.sizeScale);
     this.target = barricade;
     this.state = barricade ? 'approach' : 'hunt';
     this.phase = rng.range(0, Math.PI * 2);
@@ -195,7 +220,7 @@ export class Enemy {
     m.root.visible = true;
     m.root.position.set(x, 0, z);
     m.root.rotation.set(0, 0, 0);
-    m.root.scale.setScalar(1);
+    m.root.scale.setScalar(this.sizeScale);
     m.body.rotation.set(0, 0, 0);
     m.head.rotation.set(0, 0, 0);
     m.head.visible = true;
@@ -211,16 +236,20 @@ export class Enemy {
     this.active = false;
     this.state = 'idle';
     this.target = null;
+    this.lean = 0;
     this.model.root.visible = false;
+    this.model.root.scale.setScalar(1);
   }
 
   get headY(): number {
-    return this.y + this.model.headHeight;
+    // Leaning drops the head toward the floor and pushes it out in front; for
+    // a hit test the height is what matters.
+    return this.y + this.model.headHeight * this.sizeScale * Math.cos(this.lean);
   }
 
   /** Vertical extent used for bullet/AABB tests. */
   get bodyTop(): number {
-    return this.y + this.model.height;
+    return this.y + Math.max(0.9, this.model.height * this.sizeScale * Math.cos(this.lean)) + this.lean * 0.5;
   }
 
   /** True once it has been out of sight and far away long enough to recycle. */
@@ -234,6 +263,8 @@ export class Enemy {
    */
   applyDamage(amount: number, head: boolean, explosive: boolean, dirX = 0, dirZ = 0): HitResult {
     if (this.state === 'dead') return { killed: false, head, gibbed: false, shattered: false, headless: false, damageDealt: 0 };
+    // Padding and a helmet: only the head takes the full amount.
+    if (!head && this.bodyArmour < 1) amount *= this.bodyArmour;
     const before = this.health;
     this.health -= amount;
     this.hitFlash = 1;
@@ -308,6 +339,7 @@ export class Enemy {
     torn: Set<number>, onAttack: (e: Enemy, dmg: number) => void,
     onBoardBreak: (e: Enemy, b: BarricadeProp) => void,
     onGroan: (e: Enemy) => void,
+    onThrow: (e: Enemy, toX: number, toZ: number) => void = () => {},
   ): void {
     if (!this.active) return;
     this.hitFlash = Math.max(0, this.hitFlash - dt * 9);
@@ -357,7 +389,7 @@ export class Enemy {
         break;
       case 'hunt':
       case 'attack':
-        this.updateHunt(dt, grid, px, pz, playerAlive, torn, onAttack);
+        this.updateHunt(dt, grid, px, pz, playerAlive, torn, onAttack, onThrow);
         break;
       default:
         break;
@@ -549,6 +581,7 @@ export class Enemy {
   protected updateHunt(
     dt: number, grid: NavGrid, px: number, pz: number, playerAlive: boolean,
     torn: Set<number>, onAttack: (e: Enemy, dmg: number) => void,
+    onThrow: (e: Enemy, toX: number, toZ: number) => void = () => {},
   ): void {
     const dxp = px - this.x;
     const dzp = pz - this.z;
@@ -583,6 +616,32 @@ export class Enemy {
     }
 
     this.state = 'hunt';
+    this.throwTimer -= dt;
+
+    // A spitter that can see you stops well short and throws instead. It only
+    // holds its ground while it has a shot; lose sight of it and it closes in
+    // like everything else.
+    if (playerAlive && this.standoff > 0 && this.seesPlayer && dist < this.standoff && dist > 5) {
+      this.velX *= 0.86;
+      this.velZ *= 0.86;
+      this.faceTowards(dxp, dzp, dt * 5);
+      if (this.throwTimer <= 0 && this.stagger <= 0) {
+        this.throwTimer = 2.6 + Math.random() * 1.6;
+        this.swing = 1;
+        onThrow(this, px, pz);
+      }
+      this.thinkTimer -= dt;
+      if (this.thinkTimer <= 0) {
+        const interval = 0.12 + Math.random() * 0.08;
+        this.thinkTimer = interval;
+        this.think(grid, px, pz, dist, interval);
+      }
+      this.phase += dt * 1.4;
+      const held = grid.resolveCircle(this.x, this.z, this.radius, torn);
+      this.x = held.x;
+      this.z = held.z;
+      return;
+    }
 
     this.thinkTimer -= dt;
     if (this.thinkTimer <= 0) {
@@ -746,7 +805,7 @@ export class Enemy {
     }
 
     m.root.position.set(this.x, this.y + y, this.z);
-    m.root.rotation.set(rx, this.yaw, rz);
+    m.root.rotation.set(this.lean > 0.5 ? Math.max(rx, this.lean) : rx, this.yaw, rz);
     m.root.updateMatrix();
   }
 
@@ -833,7 +892,8 @@ export class Enemy {
     }
 
     m.root.position.set(this.x, this.y, this.z);
-    m.root.rotation.set(0, this.yaw, 0);
+    // Crawlers are the same body pitched onto its front, dragging.
+    m.root.rotation.set(this.lean, this.yaw, 0);
     m.root.updateMatrix();
   }
 }
@@ -903,7 +963,7 @@ export class EnemyPool {
       }
     }
     for (let i = 0; i < live.length; i++) {
-      for (let j = i + 1; j < live.length; j++) live[i].separate(live[j], 0.55);
+      for (let j = i + 1; j < live.length; j++) live[i].separate(live[j], 0.8);
     }
     for (const e of live) {
       const res = grid.resolveCircle(e.x, e.z, e.radius, torn);

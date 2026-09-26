@@ -10,7 +10,77 @@
  * more numerous, and brings the runners and brutes in earlier.
  */
 
-export type EnemyKind = 'walker' | 'runner' | 'brute' | 'hound';
+export type EnemyKind =
+  | 'walker' | 'runner' | 'brute' | 'hound'
+  /** Legless: drags itself along the floor, low and easy to miss. */
+  | 'crawler'
+  /** Riot padding and a helmet: shrugs off body shots, goes down to the head. */
+  | 'armoured'
+  /** Hangs back and lobs bile that leaves the floor burning. */
+  | 'spitter'
+  /** Swollen with gas: bursts when it dies, and takes the crowd with it. */
+  | 'bomber';
+
+/**
+ * What each kind is, how it is built out of the shared body, and what it does
+ * differently. `tint` multiplies the room light on the model, `scale` resizes
+ * it, and `lean` pitches the whole body forward - the crawler drags.
+ */
+export type EnemyInfo = {
+  kind: EnemyKind;
+  name: string;
+  /** Health as a multiple of the round's baseline. */
+  health: number;
+  tint: [number, number, number];
+  scale: number;
+  lean: number;
+  /** Body shots do this much; the head always takes the full amount. */
+  bodyArmour: number;
+  /** Stops at this range and throws instead of closing, 0 for everything else. */
+  range: number;
+  /** Radius of the burst when it dies, 0 for everything else. */
+  burst: number;
+};
+
+export const ENEMY_INFO: Record<EnemyKind, EnemyInfo> = {
+  walker: {
+    kind: 'walker', name: 'SHAMBLER', health: 1, tint: [1, 1, 1], scale: 1,
+    lean: 0, bodyArmour: 1, range: 0, burst: 0,
+  },
+  runner: {
+    kind: 'runner', name: 'SPRINTER', health: 0.82, tint: [1.14, 0.92, 0.88], scale: 0.94,
+    lean: 0.1, bodyArmour: 1, range: 0, burst: 0,
+  },
+  brute: {
+    kind: 'brute', name: 'BRUTE', health: 2.4, tint: [1.12, 0.7, 0.64], scale: 1.32,
+    lean: 0, bodyArmour: 0.85, range: 0, burst: 0,
+  },
+  hound: {
+    kind: 'hound', name: 'HELLHOUND', health: 1, tint: [1, 1, 1], scale: 1,
+    lean: 0, bodyArmour: 1, range: 0, burst: 0,
+  },
+  crawler: {
+    kind: 'crawler', name: 'CRAWLER', health: 0.55, tint: [0.8, 0.94, 0.76], scale: 0.96,
+    lean: 1.15, bodyArmour: 1, range: 0, burst: 0,
+  },
+  armoured: {
+    kind: 'armoured', name: 'ARMOURED', health: 2.1, tint: [0.7, 0.84, 1.08], scale: 1.08,
+    lean: 0, bodyArmour: 0.4, range: 0, burst: 0,
+  },
+  spitter: {
+    kind: 'spitter', name: 'SPITTER', health: 1.15, tint: [0.7, 1.28, 0.68], scale: 1.02,
+    lean: 0, bodyArmour: 1, range: 17, burst: 0,
+  },
+  bomber: {
+    kind: 'bomber', name: 'BLOATER', health: 0.9, tint: [1.22, 1.18, 0.58], scale: 1.16,
+    lean: 0, bodyArmour: 1, range: 0, burst: 7.5,
+  },
+};
+
+/** What a bloater's burst does to the player standing in the middle of it. */
+export const BOMBER_DAMAGE = 55;
+/** And to everything else caught in it. */
+export const BOMBER_SPLASH = 420;
 
 export type SpawnPlan = {
   round: number;
@@ -85,12 +155,29 @@ export function enemySpeed(round: number, kind: EnemyKind, threat = 0): number {
       return (2.8 + ramp * 0.5) * quicker;
     case 'hound':
       return (7.4 + Math.min(1.6, round * 0.05)) * quicker;
+    case 'crawler':
+      return (2.4 + ramp * 0.45) * quicker;
+    case 'armoured':
+      return (2.9 + ramp * 0.45) * quicker;
+    case 'spitter':
+      return (3.0 + ramp * 0.5) * quicker;
+    case 'bomber':
+      return (3.7 + ramp * 0.7) * quicker;
   }
 }
 
 export function enemyDamage(kind: EnemyKind, threat = 0): number {
-  const base = { walker: 32, runner: 34, brute: 58, hound: 28 }[kind];
+  const base = {
+    walker: 32, runner: 34, brute: 58, hound: 28,
+    crawler: 26, armoured: 40, spitter: 22, bomber: 30,
+  }[kind];
   return Math.round(base * (1 + 0.1 * threat));
+}
+
+/** Health for one body: the round's baseline, scaled by what kind it is. */
+export function healthFor(kind: EnemyKind, round: number, threat = 0): number {
+  if (kind === 'hound') return houndHealth(round, threat);
+  return Math.round(enemyHealth(round, threat) * ENEMY_INFO[kind].health);
 }
 
 /**
@@ -100,12 +187,24 @@ export function enemyDamage(kind: EnemyKind, threat = 0): number {
 export function roundMix(round: number, threat = 0): { kind: EnemyKind; weight: number }[] {
   if (isHoundRound(round)) return [{ kind: 'hound', weight: 1 }];
   const r = round + threat * 1.5;
-  const runner = r < 4 ? 0 : Math.min(0.65, (r - 3) * 0.075);
-  const brute = r < 8 ? 0 : Math.min(0.22, (r - 7) * 0.025);
-  const walker = Math.max(0.1, 1 - runner - brute);
+  /** Nothing at all until `from`, then a share that grows and levels off. */
+  const ramp = (from: number, per: number, cap: number): number =>
+    (r < from ? 0 : Math.min(cap, (r - from + 1) * per));
+  const runner = ramp(4, 0.075, 0.36);
+  const crawler = ramp(3, 0.03, 0.1);
+  const bomber = ramp(5, 0.025, 0.09);
+  const spitter = ramp(6, 0.022, 0.08);
+  const armoured = ramp(7, 0.022, 0.09);
+  const brute = ramp(8, 0.025, 0.11);
+  // Those caps come to 0.83, so there are always shamblers in the crowd.
+  const walker = 1 - runner - crawler - bomber - spitter - armoured - brute;
   return [
     { kind: 'walker', weight: walker },
     { kind: 'runner', weight: runner },
+    { kind: 'crawler', weight: crawler },
+    { kind: 'bomber', weight: bomber },
+    { kind: 'spitter', weight: spitter },
+    { kind: 'armoured', weight: armoured },
     { kind: 'brute', weight: brute },
   ];
 }
@@ -260,6 +359,23 @@ export const DROP_MIN_GAP = 12; // kills
 export const DROPS_PER_ROUND = 4;
 
 export const MYSTERY_BOX_COST = 950;
+
+/* ------------------------------------------------------------------- traps */
+
+/** What it costs to throw a trap's switch. */
+export const TRAP_COST = 1000;
+/** How long it runs for, and how long it has to cool down afterwards. */
+export const TRAP_SECONDS = 26;
+export const TRAP_COOLDOWN = 22;
+
+/**
+ * Damage a trap does per second. Pinned to the round's health, so it always
+ * takes an ordinary body down in about a third of a second: murderous early,
+ * and still worth a thousand points once nothing one-shots anything any more.
+ */
+export function trapDamage(round: number, threat = 0): number {
+  return enemyHealth(round, threat) * 3.2;
+}
 /** After this many pulls the box packs up and moves on. */
 export const BOX_MOVE_MIN = 4;
 export const BOX_MOVE_MAX = 9;

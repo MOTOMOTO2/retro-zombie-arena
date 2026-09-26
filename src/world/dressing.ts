@@ -13,9 +13,9 @@ import { Rng } from '../core/rng.ts';
 import { WALL_H, type Layout, type ThemeId, tileCenter } from './mapdata.ts';
 import type { Dresser } from './build.ts';
 import {
-  M, type Room, autopsyTable, bed, ceilingBeams, ceilingPipes, claim, coffin, crateStack, debris, desk,
+  M, type Room, type Solid, autopsyTable, bed, ceilingBeams, ceilingPipes, claim, coffin, crateStack, debris, desk,
   drawerWall, drum, filingCabinet, free, generatorUnit, glowBox, interior, ivStand, locker, pew, piece,
-  rack, screen, shelf, wallTiles,
+  rack, screen, shelf, solidBox, wallTiles,
 } from './furnish.ts';
 import { dressCemetery, dressGarage, dressHouse, dressSquare, dressStore, dressStreet } from './dress-town.ts';
 import { dressFoundry, dressLoading, dressWarehouse, dressYard } from './dress-works.ts';
@@ -32,6 +32,8 @@ function dressAdmissions(r: Room): void {
     const c = tileCenter(s.tx, s.tz);
     r.b.box(M.woodV(), r.amb, 9, 2.1, 1.3, c.x, 1.05, c.z);
     r.b.box(M.flat(0x3a2a1a), r.amb, 9.4, 0.18, 1.7, c.x, 2.15, c.z);
+    // The counter is a real barrier: three boxes, so you can go round either end.
+    for (const off of [-3, 0, 3]) solidBox(r, c.x + off, c.z, 1.4, 0.75);
     r.b.box(M.paper(), r.amb, 1.0, 0.3, 1.2, c.x - 2.5, 2.4, c.z, 0.2);
     r.b.box(M.flat(0x1a1a1a), r.amb, 0.9, 0.7, 0.8, c.x + 2.2, 2.6, c.z, -0.3);
     for (const dx of [-1, 0, 1]) claim(r, s.tx + dx, s.tz);
@@ -298,14 +300,18 @@ const DRESS: Record<ThemeId, (r: Room) => void> = {
 };
 
 /** Returns the dresser for a layout, to be handed to buildLevel. */
-export function dressLevel(layout: Layout): Dresser {
+/**
+ * Dresses every room. `solids` is filled in as it goes with the boxes the
+ * furniture puts on the floor; the caller hands those to the collision grid.
+ */
+export function dressLevel(layout: Layout, solids: Solid[] = []): Dresser {
   return (b, lighting, rng, taken) => {
     // Street lamps are already standing where the level put them.
     const claimed = new Set<number>(taken);
     for (const zone of layout.zones) {
       const c = tileCenter(zone.rect.x + zone.rect.w / 2, zone.rect.z + zone.rect.h / 2);
       const room: Room = {
-        b, zone, layout, lighting, claimed,
+        b, zone, layout, lighting, claimed, solids,
         rng: new Rng(rng.int(0x7fffffff)),
         amb: lighting.ambientAt(c.x, c.z),
       };

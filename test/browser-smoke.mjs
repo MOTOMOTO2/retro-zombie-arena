@@ -246,6 +246,223 @@ try {
 
   for (const [k, v] of Object.entries(economy)) check(`economy: ${k}`, v === true);
 
+
+  // ------------------------------------------------- solid props and furniture
+  const solid = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun(4242, 'asylum');
+    game.input.locked = true;
+    const grid = game.grid;
+    const L = game.layout;
+    out.furnitureIsSolid = grid.obstacleCount > 40;
+
+    // Standing inside a vending machine is not allowed, for anybody.
+    const machine = game.props.machines[0];
+    const f = machine.footprint;
+    out.machineBlocksBodies = grid.blocked(f.x, f.z, 0.7);
+    const pushed = grid.resolveCircle(f.x, f.z, 0.82);
+    out.bodiesGetPushedOut = Math.hypot(pushed.x - f.x, pushed.z - f.z) > 0.2;
+    out.openFloorStaysFree = !grid.blocked(
+      (L.spawn.tx + 0.5) * 4, (L.spawn.tz + 0.5) * 4, 0.82,
+    );
+
+    // A zombie walked into a machine comes back out of it.
+    const e = game.pool.acquire('walker');
+    e.spawn('walker', f.x, f.z, 500, 1, null, game.rng, 0);
+    for (let i = 0; i < 20; i++) game.update(1 / 60);
+    out.hordeCannotStandInMachines = !grid.blocked(e.x, e.z, e.radius * 0.8);
+    game.pool.reset();
+
+    // With every door open, a body of the player's size can still walk to
+    // everything that matters, on every map: no piece of furniture, and no
+    // machine, has sealed anything off. Walked on a one-unit lattice with the
+    // real collision code, so it is the player's own body doing the walking.
+    const STEP = 4; // cells per tile, so one cell per world unit
+    const span = 96 * STEP;
+    const seen = new Uint8Array(span * span);
+    const sweep = () => {
+      const layout = game.layout;
+      const g = game.grid;
+      game.player.award(1e6);
+      for (const d of game.props.doors) if (!d.open) game.buyDoor(d);
+      seen.fill(0);
+      const start = Math.floor((layout.spawn.tz + 0.5) * 4) * span + Math.floor((layout.spawn.tx + 0.5) * 4);
+      const queue = [start];
+      seen[start] = 1;
+      for (let head = 0; head < queue.length; head++) {
+        const cur = queue[head];
+        const cz = Math.floor(cur / span);
+        const cx = cur % span;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = cx + dx;
+          const nz = cz + dz;
+          if (nx < 0 || nz < 0 || nx >= span || nz >= span) continue;
+          const ni = nz * span + nx;
+          if (seen[ni] || g.blocked(nx + 0.5, nz + 0.5, 0.82)) continue;
+          seen[ni] = 1;
+          queue.push(ni);
+        }
+      }
+      const reachable = (p) => {
+        // Somewhere in the tile in front of the prop has to be standable.
+        const tx = p.tx + Math.round(Math.sin(p.facing));
+        const tz = p.tz + Math.round(Math.cos(p.facing));
+        for (let sz = 0; sz < STEP; sz++) {
+          for (let sx = 0; sx < STEP; sx++) {
+            if (seen[(tz * STEP + sz) * span + tx * STEP + sx]) return true;
+          }
+        }
+        return false;
+      };
+      const props = [
+        ...layout.wallBuys, ...layout.perks, ...layout.boxPads, ...layout.traps,
+        ...layout.parts, ...layout.spots,
+        layout.powerSwitch, layout.pack, layout.workbench, layout.exit,
+      ];
+      return { stranded: props.filter((p) => !reachable(p)).length, cells: queue.length };
+    };
+
+    let stranded = 0;
+    let cells = 0;
+    for (const [map, seed] of [['asylum', 4242], ['town', 11], ['foundry', 12], ['labs', 13]]) {
+      game.newRun(seed, map);
+      game.input.locked = true;
+      const r = sweep();
+      stranded += r.stranded;
+      cells += r.cells;
+    }
+    out.everythingIsStillReachable = stranded === 0;
+    out.strandedCount = stranded;
+    out.cellsWalked = cells;
+    return out;
+  });
+  check('solids: the set dressing has bulk', solid.furnitureIsSolid === true, `${solid.cellsWalked} floor cells walked`);
+  for (const k of ['machineBlocksBodies', 'bodiesGetPushedOut', 'openFloorStaysFree',
+    'hordeCannotStandInMachines', 'everythingIsStillReachable']) {
+    check(`solids: ${k}`, solid[k] === true, k === 'everythingIsStillReachable' ? `${solid.strandedCount} stranded` : '');
+  }
+
+  // ------------------------------------------------------------------ traps
+  const traps = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun(4242, 'asylum');
+    game.input.locked = true;
+    game.player.award(60000);
+    game.pool.reset();
+    const t = game.props.traps[0];
+    out.mapHasTraps = game.props.traps.length >= 2;
+    out.trapsStartDead = !t.powered && t.state === 'ready';
+    game.buyTrap(t);
+    out.deadTrapTakesNoMoney = !t.live;
+
+    game.turnOnPower();
+    out.powerWakesTheTraps = game.props.traps.every((x) => x.powered);
+    const before = game.player.points;
+    game.buyTrap(t);
+    out.trapCostsAThousand = before - game.player.points === 1000;
+    out.trapRuns = t.live;
+
+    // Anything standing in it dies, and the kill pays.
+    const e = game.pool.acquire('walker');
+    e.spawn('walker', t.zone.x, t.zone.z, 400, 1, null, game.rng, 0);
+    const kills = game.player.kills;
+    for (let i = 0; i < 90 && e.state !== 'dead'; i++) {
+      // Hold it in the zone: left alone it would walk out of the far side.
+      e.x = t.zone.x;
+      e.z = t.zone.z;
+      game.update(1 / 60);
+    }
+    out.trapKillsWhatWalksIn = e.state === 'dead';
+    out.trapKillsPay = game.player.kills > kills;
+
+    // It runs down, cools off, and comes back.
+    let cooled = false;
+    for (let i = 0; i < 60 * 30 && !cooled; i++) {
+      game.player.health = game.player.maxHealth;
+      game.update(1 / 60);
+      cooled = t.state === 'cooling';
+    }
+    out.trapRunsOut = cooled;
+    const midCooldown = game.player.points;
+    game.buyTrap(t);
+    out.coolingTrapTakesNoMoney = game.player.points === midCooldown;
+    for (let i = 0; i < 60 * 30 && t.state !== 'ready'; i++) {
+      game.player.health = game.player.maxHealth;
+      game.update(1 / 60);
+    }
+    out.trapRecharges = t.state === 'ready';
+    return out;
+  });
+  for (const [k, v] of Object.entries(traps)) check(`traps: ${k}`, v === true);
+
+  // ----------------------------------------------------------- zombie kinds
+  const kinds = await page.evaluate(() => {
+    const { game } = window.__RZA;
+    const out = {};
+    game.newRun(4242, 'asylum');
+    game.input.locked = true;
+    game.pool.reset();
+    const put = (kind, x, z, health = 1000) => {
+      const e = game.pool.acquire(kind);
+      e.spawn(kind, x, z, health, 12, null, game.rng, 0);
+      return e;
+    };
+    const px = game.player.x;
+    const pz = game.player.z;
+
+    // Every kind turns up in the mix eventually, and each is built differently.
+    const mix = game.plan.mix.map((m) => m.kind);
+    out.roundsMixSeveralKinds = new Set(mix).size >= 1;
+    const walker = put('walker', px + 8, pz);
+    const brute = put('brute', px + 10, pz);
+    const crawler = put('crawler', px + 12, pz);
+    out.brutesAreBigger = brute.sizeScale > walker.sizeScale * 1.2;
+    out.crawlersKeepTheirHeadsDown = crawler.headY < walker.headY * 0.6;
+    out.crawlersAreSmallerTargets = crawler.radius < walker.radius;
+
+    // Armour blunts body shots but not headshots.
+    const armoured = put('armoured', px + 14, pz, 4000);
+    armoured.applyDamage(400, false, false, 1, 0);
+    const body = 4000 - armoured.health;
+    armoured.health = 4000;
+    armoured.applyDamage(400, true, false, 1, 0);
+    const head = 4000 - armoured.health;
+    out.armourSoaksBodyShots = body < head * 0.7 && head === 400;
+
+    // A bloater going down takes the crowd with it. Both bodies go on the
+    // player's own tile, which is certainly open floor with a clear view.
+    game.pool.reset();
+    const bomber = put('bomber', px, pz, 100);
+    const bystander = put('walker', px + 2, pz, 4000);
+    game.damageEnemy(bomber, 1e6, false, false, { x: bomber.x, y: 2, z: bomber.z });
+    for (let i = 0; i < 4; i++) {
+      game.player.health = game.player.maxHealth;
+      game.update(1 / 60);
+    }
+    out.bloatersBurst = bystander.health < 4000 || bystander.state === 'dead';
+
+    // A spitter holds its ground and throws instead of closing.
+    game.pool.reset();
+    game.player.health = game.player.maxHealth;
+    const spitter = put('spitter', px + 12, pz, 6000);
+    let threw = false;
+    let closed = 99;
+    for (let i = 0; i < 60 * 6; i++) {
+      game.player.health = game.player.maxHealth;
+      game.update(1 / 60);
+      if (game.bossShots.length) threw = true;
+      closed = Math.min(closed, Math.hypot(spitter.x - game.player.x, spitter.z - game.player.z));
+      if (spitter.state === 'dead') break;
+    }
+    out.spittersThrowFromRange = threw;
+    out.spittersKeepTheirDistance = closed > 4;
+    game.pool.reset();
+    return out;
+  });
+  for (const [k, v] of Object.entries(kinds)) check(`kinds: ${k}`, v === true);
+
   // --------------------------------------------------------------- gunplay
   const gunplay = await page.evaluate(() => {
     const { game } = window.__RZA;
@@ -1038,7 +1255,8 @@ try {
     game.player.award(1e6);
     for (let i = 0; i < 10; i++) game.update(1 / 60);
     out.objectivesListed = document.querySelectorAll('#objective-list li').length === 3;
-    out.waypointShows = shown('waypoint');
+    // There is no objective marker any more: nothing points at the answer.
+    out.noWaypointMarker = document.getElementById('waypoint') === null;
     for (let i = 0; i < 60 * 4; i++) { live(); game.update(1 / 60); }
     out.radioSpeaks = shown('radio') && document.getElementById('radio-text').textContent.length > 10;
     out.workbenchWaits = !game.quest.canBuild;

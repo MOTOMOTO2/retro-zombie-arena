@@ -155,6 +155,15 @@ export class BossEnemy extends Enemy {
   /** Brings it in through a window, or straight into the hunt when there is none. */
   begin(x: number, z: number, health: number, barricade: BarricadeProp | null, rng: Rng, hooks: BossHooks): void {
     this.spawn('brute', x, z, health, 1, barricade, rng);
+    // A boss borrows the brute's spawn but none of its trimmings: it is built
+    // at its own size, it has no armour plate and it never bursts.
+    this.sizeScale = 1;
+    this.lean = 0;
+    this.bodyArmour = 1;
+    this.standoff = 0;
+    this.burst = 0;
+    this.radius = this.model.radius;
+    this.model.root.scale.setScalar(1);
     this.speed = this.spec.speed;
     this.hooks = hooks;
     this.dice = rng;

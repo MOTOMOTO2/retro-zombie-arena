@@ -5,7 +5,14 @@
  * cells and joined to their neighbours by short corridors: a random spanning
  * tree plus extra links, so there is always at least one loop to train a horde
  * around. Then the rooms are themed and dressed with windows, wall guns, perk
- * machines, box pads, the power switch and Pack-a-Punch.
+ * machines, box pads, traps, the power switch and Pack-a-Punch.
+ *
+ * Where those land is rolled fresh every run. Only two things are pinned: the
+ * generator has to be a fair way in (so the lights are worth working for) and
+ * the starting room keeps its shotgun, its Quick Revive and the way out.
+ * Everything else - Pack-a-Punch, the perk machines, the mystery box pads, the
+ * traps, the quest props - goes wherever the dice put it, which is the whole
+ * point: no two runs send you to the same corner of the building.
  *
  * The tile grid is still the single source of truth, so the geometry, the
  * navigation grid and the gameplay triggers can never drift apart - and every
@@ -46,6 +53,9 @@ export type ThemeId =
 /** What the passages between rooms look like on each map. */
 export type CorridorLook = 'corridor' | 'alley' | 'service' | 'labhall';
 
+/** The two kinds of trap a map can be wired with. */
+export type TrapKind = 'shock' | 'flame';
+
 export type MapId = 'asylum' | 'town' | 'foundry' | 'labs';
 
 /**
@@ -81,6 +91,10 @@ export type MapProfile = {
   windows: [number, number];
   /** Mystery boxes running at once. */
   boxes: number;
+  /** Buyable traps wired into the map. */
+  traps: number;
+  /** Which kinds this map's traps are drawn from. */
+  trapKinds: TrapKind[];
 };
 
 export type ZoneId = string;
@@ -126,6 +140,16 @@ export type WallProp = { zone: ZoneId; tx: number; tz: number; facing: number };
 export type WallBuyDef = WallProp & { weapon: string };
 export type PerkDef = WallProp & { perk: string };
 
+/**
+ * A trap: a wall panel you pay to switch on, and the stretch of floor in
+ * front of it that it cooks for half a minute afterwards. The kill zone is
+ * the two tiles ahead of the panel and one to each side.
+ */
+export type TrapDef = WallProp & {
+  id: string;
+  kind: TrapKind;
+};
+
 export type Layout = {
   seed: number;
   map: MapId;
@@ -141,6 +165,8 @@ export type Layout = {
   perks: PerkDef[];
   /** The mystery boxes hop between these; index 0 is where the first one starts. */
   boxPads: WallProp[];
+  /** Traps, spread over the map. */
+  traps: TrapDef[];
   powerSwitch: WallProp;
   pack: WallProp;
   /** Where the three quest parts are found, in three different rooms. */
@@ -524,7 +550,13 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
   const startCell = startCandidates[rng.weighted(startCandidates.map((id) => (adj.get(id) as number[]).length ** 2))];
   const depth = depthFrom(startCell);
   const maxDepth = Math.max(...depth.values());
-  const powerCell = rng.pick(roomIds.filter((id) => depth.get(id) === maxDepth));
+  // The generator is the one machine that is not placed at random: it has to
+  // be at least a couple of doors in, or the lights come on for nothing. Which
+  // of the deep rooms it is, though, changes every run.
+  const deepEnough = Math.min(2, maxDepth);
+  const powerOptions = roomIds.filter((id) => id !== startCell && (depth.get(id) as number) >= deepEnough);
+  if (!powerOptions.length) return null;
+  const powerCell = rng.pick(powerOptions);
 
   const themes = new Map<number, ThemeId>();
   themes.set(startCell, rng.pick(profile.startThemes));
@@ -705,11 +737,12 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
   const slotsByZone = new Map<ZoneId, { tx: number; tz: number; nx: number; nz: number }[]>();
   for (const zone of zones) slotsByZone.set(zone.id, shuffle(rng, wallSlots(tiles, zone)));
 
-  const takeSlot = (zone: ZoneDef): WallProp | null => {
+  const takeSlot = (zone: ZoneDef, need?: (s: { tx: number; tz: number; nx: number; nz: number }) => boolean): WallProp | null => {
     const slots = slotsByZone.get(zone.id) as { tx: number; tz: number; nx: number; nz: number }[];
     for (let i = 0; i < slots.length; i++) {
       const s = slots[i];
       if (reserved.has(s.tz * MAP_W + s.tx)) continue;
+      if (need && !need(s)) continue;
       slots.splice(i, 1);
       // The prop, its neighbours along the wall, and the tile in front of it.
       const lx = Math.abs(s.nz);
@@ -722,9 +755,10 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
   };
 
   const powerSwitch = takeSlot(powerZone);
-  const pack = takeSlot(powerZone);
-  if (!powerSwitch || !pack) return null;
+  if (!powerSwitch) return null;
 
+  // The start room always keeps the same four fixtures, so a run always opens
+  // the same way: a shotgun, something automatic, Quick Revive and the way out.
   const perks: PerkDef[] = [];
   const revive = takeSlot(startZone);
   if (!revive) return null;
@@ -739,49 +773,81 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
   const exit = takeSlot(startZone);
   if (!exit) return null;
 
-  const others = shuffle(rng, zones.filter((z) => z !== startZone && z !== powerZone));
+  /* Everything else is scattered. Each thing gets its own shuffle of the rooms
+     beyond the start, so nothing ends up tied to the shape of the map. */
+  const others = zones.filter((z) => z !== startZone);
+  if (others.length < 3) return null;
+
+  /** A slot in the first room of a fresh shuffle that still has one. */
+  const takeAnywhere = (need?: (s: { tx: number; tz: number; nx: number; nz: number }) => boolean): WallProp | null => {
+    for (const z of shuffle(rng, [...others])) {
+      const slot = takeSlot(z, need);
+      if (slot) return slot;
+    }
+    return null;
+  };
+
+  /** `count` slots, in `count` different rooms wherever the map allows it. */
+  const takeSpread = (count: number): WallProp[] => {
+    const bag = shuffle(rng, [...others]);
+    const out: WallProp[] = [];
+    const used = new Set<ZoneDef>();
+    for (const z of bag) {
+      if (out.length >= count) break;
+      if (used.has(z)) continue;
+      const slot = takeSlot(z);
+      if (!slot) continue;
+      used.add(z);
+      out.push(slot);
+    }
+    // Too few rooms with a free wall left: double up rather than fail.
+    for (let k = 0; out.length < count && k < bag.length * 2; k++) {
+      const slot = takeSlot(bag[k % bag.length]);
+      if (slot) out.push(slot);
+    }
+    return out;
+  };
+
+  const pack = takeAnywhere();
+  if (!pack) return null;
+
   const perkQueue = shuffle(rng, [...OTHER_PERKS]);
-  for (let i = 0; perkQueue.length && i < others.length * 2; i++) {
-    const slot = takeSlot(others[i % others.length]);
+  const perkBag = shuffle(rng, [...others]);
+  for (let i = 0; perkQueue.length && i < perkBag.length * 2; i++) {
+    const slot = takeSlot(perkBag[i % perkBag.length]);
     if (slot) perks.push({ ...slot, perk: perkQueue.shift() as string });
   }
   if (perkQueue.length) return null;
 
-  // The three quest parts go to three different rooms spread through the map:
-  // one near the start, one halfway, one deep in.
-  const depthOfZone = (z: ZoneDef): number => {
-    for (const [id, zone] of zoneOfRoom) if (zone === z) return depth.get(id) as number;
-    return 0;
-  };
-  const byDepth = [...others, powerZone].sort((a, b) => depthOfZone(a) - depthOfZone(b));
-  if (byDepth.length < 3) return null;
-  const parts: WallProp[] = [];
-  const partZones = new Set<ZoneDef>();
-  for (const f of [0, 0.5, 1]) {
-    const want = Math.round(f * (byDepth.length - 1));
-    for (let k = 0; k < byDepth.length && parts.length < 3; k++) {
-      const z = byDepth[(want + k) % byDepth.length];
-      if (partZones.has(z)) continue;
-      const slot = takeSlot(z);
-      if (!slot) continue;
-      parts.push(slot);
-      partZones.add(z);
-      break;
-    }
-  }
-  if (parts.length < 3) return null;
+  const parts = takeSpread(3);
+  if (parts.length < 3 || new Set(parts.map((p) => p.zone)).size < 3) return null;
 
-  // The workbench sits somewhere in the middle of the map, never in the start room.
-  const benchRooms = byDepth.filter((z) => z !== powerZone);
-  let workbench: WallProp | null = null;
-  for (let k = 0; k < benchRooms.length && !workbench; k++) {
-    workbench = takeSlot(benchRooms[(Math.floor(benchRooms.length / 2) + k) % benchRooms.length]);
-  }
+  const spots = takeSpread(3);
+  if (spots.length < 3) return null;
+  if (others.length >= 3 && new Set(spots.map((p) => p.zone)).size < 3) return null;
+
+  const workbench = takeAnywhere();
   if (!workbench) return null;
+
+  // Traps need two clear tiles in front of the panel for the kill zone.
+  const trapRoom = (s: { tx: number; tz: number; nx: number; nz: number }): boolean =>
+    tileAt(tiles, s.tx + s.nx, s.tz + s.nz) === T_FLOOR
+    && tileAt(tiles, s.tx + s.nx * 2, s.tz + s.nz * 2) === T_FLOOR;
+  const traps: TrapDef[] = [];
+  const trapUsed = new Set<ZoneDef>();
+  for (const z of shuffle(rng, [...others])) {
+    if (traps.length >= profile.traps) break;
+    if (trapUsed.has(z)) continue;
+    const slot = takeSlot(z, trapRoom);
+    if (!slot) continue;
+    trapUsed.add(z);
+    traps.push({ ...slot, id: `t${traps.length}`, kind: rng.pick(profile.trapKinds) });
+  }
+  if (traps.length < Math.min(2, profile.traps)) return null;
 
   const second = wallBuys[1].weapon === 'trench' ? 'grease' : 'trench';
   const gunQueue = shuffle(rng, [...OTHER_GUNS, second]);
-  const gunRooms = [powerZone, ...others];
+  const gunRooms = shuffle(rng, [...others]);
   for (let i = 0; i < gunRooms.length; i++) {
     // Once the special guns are placed, bigger maps get the everyday ones again.
     const weapon = gunQueue.length ? gunQueue.shift() as string : rng.chance(0.6) ? rng.pick(FILLER_GUNS) : null;
@@ -790,32 +856,13 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
     if (slot) wallBuys.push({ ...slot, weapon });
   }
 
+  // Box pads: one per room, in a random order, so the box starts anywhere.
   const boxPads: WallProp[] = [];
-  for (const zone of [startZone, ...others]) {
+  for (const zone of shuffle(rng, [...zones])) {
     const slot = takeSlot(zone);
     if (slot) boxPads.push(slot);
   }
-  if (boxPads.length < 3 || boxPads[0].zone !== startZone.id) return null;
-
-  // Three spots for valves and vents, spread out like the parts: in three
-  // different rooms where the map has them, never in the start room. Taking a
-  // slot rolls no dice, so this leaves everything above exactly as it was.
-  const spots: WallProp[] = [];
-  const spotZones = new Set<ZoneDef>();
-  for (const f of [0.3, 0.7, 1]) {
-    const want = Math.round(f * (byDepth.length - 1));
-    for (let k = 0; k < byDepth.length * 2 && spots.length < 3; k++) {
-      const z = byDepth[(want + k) % byDepth.length];
-      // First time round only rooms without a spot yet; then any room will do.
-      if (k < byDepth.length && spotZones.has(z)) continue;
-      const slot = takeSlot(z);
-      if (!slot) continue;
-      spots.push(slot);
-      spotZones.add(z);
-      break;
-    }
-  }
-  if (spots.length < 3) return null;
+  if (boxPads.length < 3) return null;
 
   /* -- 10. where the player wakes up -------------------------------------- */
   const r = startZone.rect;
@@ -859,6 +906,7 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
     wallBuys,
     perks,
     boxPads,
+    traps,
     powerSwitch,
     pack,
     parts,
@@ -872,6 +920,31 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
     zoneIndex,
     reserved,
   };
+}
+
+/** Walking distance in tiles from a start tile over open floor. */
+function walkDistances(map: Uint8Array, startTx: number, startTz: number): Map<number, number> {
+  const out = new Map<number, number>();
+  if (tileAt(map, startTx, startTz) !== T_FLOOR) return out;
+  const start = startTz * MAP_W + startTx;
+  out.set(start, 0);
+  const queue = [start];
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head];
+    const cx = cur % MAP_W;
+    const cz = (cur / MAP_W) | 0;
+    const nd = (out.get(cur) as number) + 1;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cx + dx;
+      const nz = cz + dz;
+      if (tileAt(map, nx, nz) !== T_FLOOR) continue;
+      const ni = nz * MAP_W + nx;
+      if (out.has(ni)) continue;
+      out.set(ni, nd);
+      queue.push(ni);
+    }
+  }
+  return out;
 }
 
 /**
@@ -911,6 +984,7 @@ export function validateLayout(L: Layout): string[] {
   for (const w of L.wallBuys) stand(`wall buy ${w.weapon}`, w, true);
   for (const p of L.perks) stand(`perk ${p.perk}`, p, true);
   L.boxPads.forEach((p, i) => stand(`box pad ${i}`, p, true));
+  L.traps.forEach((t) => stand(`trap ${t.id}`, t, true));
   stand('power switch', L.powerSwitch, true);
   stand('pack-a-punch', L.pack, true);
   L.parts.forEach((p, i) => stand(`quest part ${i}`, p, true));
@@ -925,11 +999,20 @@ export function validateLayout(L: Layout): string[] {
   if (L.workbench.zone === L.spawnZone) errs.push('the workbench is in the start room');
   if (L.exit.zone !== L.spawnZone) errs.push('the exit is not in the start room');
 
-  if (L.powerSwitch.zone !== L.powerZone || L.pack.zone !== L.powerZone) errs.push('power room is missing its machines');
+  if (L.powerSwitch.zone !== L.powerZone) errs.push('the power switch is not in the generator room');
+  if (L.pack.zone === L.spawnZone) errs.push('pack-a-punch is in the start room');
   if (!L.perks.some((p) => p.perk === 'revive' && p.zone === L.spawnZone)) errs.push('no quick revive in the start room');
   if (!L.wallBuys.some((w) => w.weapon === 'boomstick' && w.zone === L.spawnZone)) errs.push('no starter shotgun');
   if (new Set(L.perks.map((p) => p.perk)).size !== 5) errs.push('not every perk was placed');
-  if (!L.boxPads.length || L.boxPads[0].zone !== L.spawnZone) errs.push('the box does not start in the start room');
+  if (L.boxPads.length < 3) errs.push('there are too few box pads for the box to move between');
+  if (L.traps.length < 2) errs.push('the map needs at least two traps');
+  if (L.traps.some((t) => t.zone === L.spawnZone)) errs.push('a trap is in the start room');
+  for (const t of L.traps) {
+    const { nx, nz } = facingNormal(t.facing);
+    if (at(t.tx + nx, t.tz + nz) !== T_FLOOR || at(t.tx + nx * 2, t.tz + nz * 2) !== T_FLOOR) {
+      errs.push(`trap ${t.id} has no room for its kill zone`);
+    }
+  }
 
   for (const d of L.doors) {
     for (let z = d.rect.z; z < d.rect.z + d.rect.h; z++) {
@@ -971,6 +1054,7 @@ export function validateLayout(L: Layout): string[] {
   }
   const mustReach: [string, WallProp][] = [
     ...L.wallBuys.map((w): [string, WallProp] => [`wall buy ${w.weapon}`, w]),
+    ...L.traps.map((t): [string, WallProp] => [`trap ${t.id}`, t]),
     ...L.perks.map((p): [string, WallProp] => [`perk ${p.perk}`, p]),
     ...L.boxPads.map((p, i): [string, WallProp] => [`box pad ${i}`, p]),
     ['power switch', L.powerSwitch],
@@ -982,6 +1066,17 @@ export function validateLayout(L: Layout): string[] {
   ];
   for (const [what, p] of mustReach) {
     if (!reach.has(p.tz * MAP_W + p.tx)) errs.push(`${what} is unreachable`);
+  }
+
+  // The generator is the one fixture with a rule about where it lands: it must
+  // be further off than anything the start room sells, or the lights are free.
+  const steps = walkDistances(open, L.spawn.tx, L.spawn.tz);
+  const toPower = steps.get(L.powerSwitch.tz * MAP_W + L.powerSwitch.tx) ?? -1;
+  if (toPower <= 0) errs.push('the power switch is not a walk away from the spawn');
+  for (const w of L.wallBuys) {
+    if (w.zone !== L.spawnZone) continue;
+    const d = steps.get(w.tz * MAP_W + w.tx) ?? 0;
+    if (toPower <= d) errs.push('the power is no further off than the start room guns');
   }
 
   return errs;

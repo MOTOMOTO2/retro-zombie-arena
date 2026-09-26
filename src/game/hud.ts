@@ -1,6 +1,10 @@
 /**
  * The HUD is plain DOM on top of the canvas: it stays crisp while the 3D view
  * stays chunky, which is exactly the split the console shooters of the era used.
+ *
+ * There is deliberately no objective marker. The objective list says what the
+ * job is; finding the room it is in is the game. The minimap (Tab) draws the
+ * building and what is standing in it, and nothing points at the answer.
  */
 
 import {
@@ -68,8 +72,6 @@ export class Hud {
   private readonly bossEl = el('boss-bar');
   private readonly bossName = el('boss-name');
   private readonly bossFill = el('boss-fill');
-  private readonly waypointEl = el('waypoint');
-  private readonly waypointDist = el('waypoint-dist');
 
   private deltaTimer = 0;
   private deltaValue = 0;
@@ -312,22 +314,6 @@ export class Hud {
     if (this.bossName.textContent !== name) this.bossName.textContent = name;
     this.bossFill.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
     this.bossEl.classList.toggle('enraged', enraged);
-  }
-
-  /**
-   * The objective marker at a screen position in CSS pixels. `edge` pins it
-   * to the border of the screen when the target is behind or off to a side.
-   */
-  setWaypoint(x: number | null, y = 0, metres = 0, edge = false): void {
-    if (x === null) {
-      this.waypointEl.classList.add('hidden');
-      return;
-    }
-    this.waypointEl.classList.remove('hidden');
-    this.waypointEl.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    this.waypointEl.classList.toggle('edge', edge);
-    const label = `${Math.round(metres)}M`;
-    if (this.waypointDist.textContent !== label) this.waypointDist.textContent = label;
   }
 
   toggleMap(on: boolean): void {

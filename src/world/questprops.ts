@@ -255,6 +255,8 @@ export class ValveProp {
 export class WorkbenchProp {
   readonly group = new THREE.Group();
   readonly center: THREE.Vector3;
+  /** The bench is a real bench: bodies have to go round it. */
+  readonly footprint: { x: number; z: number; hx: number; hz: number };
   private readonly slots: THREE.Group[] = [];
   private readonly ghosts: THREE.Mesh[] = [];
   private readonly lampMat: THREE.MeshBasicMaterial;
@@ -267,6 +269,8 @@ export class WorkbenchProp {
   constructor(p: WallProp, probe: LightProbe, slots: number) {
     const pos = againstWall(p, 1.3);
     this.center = new THREE.Vector3(pos.x, 1.8, pos.z);
+    const alongZ = Math.abs(Math.cos(p.facing)) > 0.5;
+    this.footprint = { x: pos.x, z: pos.z, hx: (alongZ ? 3.8 : 1.8) / 2, hz: (alongZ ? 1.8 : 3.8) / 2 };
     this.group.position.copy(pos);
     this.group.rotation.y = p.facing;
 

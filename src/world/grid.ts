@@ -5,6 +5,20 @@
  * a few times a second. With a 48x40 grid that is ~1900 cells, so a full rebuild
  * is cheaper than running A* per zombie and it gives a whole horde perfect,
  * identical routing - which is exactly the arcade behaviour we want.
+ *
+ * On top of the tiles sits an obstacle layer: axis-aligned boxes on the floor
+ * for everything solid that is smaller than a tile - perk machines, the
+ * Pack-a-Punch, the mystery box, trap pylons, and the chunky half of the set
+ * dressing. Bodies are pushed out of those the same way they are pushed out of
+ * walls, so neither the player nor the horde walks through the furniture any
+ * more. Static ones are bucketed by tile, so a lookup only ever visits the few
+ * boxes that touch the tiles the body overlaps; the handful that move (the
+ * mystery boxes) live in a short list that is scanned in full.
+ *
+ * The flow field deliberately ignores obstacles. They are all far smaller than
+ * the rooms they stand in, the push-out slides a body along them, and the
+ * enemy's own stuck detection shoulders it sideways - which is much cheaper
+ * than a sub-tile navigation mesh and, in an arcade arena, reads the same.
  */
 
 import {
@@ -30,6 +44,16 @@ export type Hit = {
   tz: number;
 };
 
+/** A solid box on the floor, in world units. Half-extents, axis aligned. */
+export type Obstacle = {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  /** A box that is switched off is ignored: a mystery box in flight, say. */
+  active: boolean;
+};
+
 const NEIGHBOURS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
   [-1, 0],
@@ -47,6 +71,15 @@ export class NavGrid {
   private readonly flowZ: Int8Array;
   private readonly queue: Int32Array;
   private fieldOrigin = -1;
+
+  /** Solid boxes that never move, bucketed by the tiles they touch. */
+  private readonly obstacles: Obstacle[] = [];
+  private readonly buckets = new Map<number, number[]>();
+  /** Which resolve pass last looked at each static obstacle, so none is pushed twice. */
+  private readonly seen: number[] = [];
+  private pass = 0;
+  /** Solid boxes that move. Short enough to scan in full every resolve. */
+  readonly movers: Obstacle[] = [];
 
   constructor(base: Uint8Array) {
     this.base = base;
@@ -76,6 +109,74 @@ export class NavGrid {
     this.fieldOrigin = -1; // topology changed, force a flow-field rebuild
   }
 
+  /* ------------------------------------------------------------ obstacles */
+
+  /**
+   * Adds a solid box on the floor. `hx`/`hz` are half-extents in world units;
+   * rotated furniture is registered as the box that contains it.
+   */
+  addObstacle(x: number, z: number, hx: number, hz: number): Obstacle {
+    const o: Obstacle = { x, z, hx, hz, active: true };
+    const i = this.obstacles.length;
+    this.obstacles.push(o);
+    this.seen.push(-1);
+    const tx0 = Math.floor((x - hx) / TILE);
+    const tx1 = Math.floor((x + hx) / TILE);
+    const tz0 = Math.floor((z - hz) / TILE);
+    const tz1 = Math.floor((z + hz) / TILE);
+    for (let tz = tz0; tz <= tz1; tz++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        if (!this.inBounds(tx, tz)) continue;
+        const key = this.idx(tx, tz);
+        const list = this.buckets.get(key);
+        if (list) list.push(i);
+        else this.buckets.set(key, [i]);
+      }
+    }
+    return o;
+  }
+
+  /** A moving solid: the caller keeps the handle and edits it in place. */
+  addMover(x: number, z: number, hx: number, hz: number): Obstacle {
+    const o: Obstacle = { x, z, hx, hz, active: true };
+    this.movers.push(o);
+    return o;
+  }
+
+  clearObstacles(): void {
+    this.obstacles.length = 0;
+    this.seen.length = 0;
+    this.movers.length = 0;
+    this.buckets.clear();
+  }
+
+  get obstacleCount(): number {
+    return this.obstacles.length;
+  }
+
+  /** True when a body of this radius standing here would be inside something solid. */
+  blocked(x: number, z: number, r: number): boolean {
+    const minTx = Math.floor((x - r) / TILE);
+    const maxTx = Math.floor((x + r) / TILE);
+    const minTz = Math.floor((z - r) / TILE);
+    const maxTz = Math.floor((z + r) / TILE);
+    for (let tz = minTz; tz <= maxTz; tz++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        if (this.solid(tx, tz) && boxOverlapsCircle(tx * TILE, tz * TILE, TILE, TILE, x, z, r)) return true;
+        const list = this.buckets.get(this.idx(tx, tz));
+        if (!list) continue;
+        for (const i of list) {
+          const o = this.obstacles[i];
+          if (o.active && boxOverlapsCircle(o.x - o.hx, o.z - o.hz, o.hx * 2, o.hz * 2, x, z, r)) return true;
+        }
+      }
+    }
+    for (const o of this.movers) {
+      if (o.active && boxOverlapsCircle(o.x - o.hx, o.z - o.hz, o.hx * 2, o.hz * 2, x, z, r)) return true;
+    }
+    return false;
+  }
+
   /** Walls block everything. Barricades block the player but not zombies once torn. */
   solid(tx: number, tz: number): boolean {
     const t = this.get(tx, tz);
@@ -91,8 +192,10 @@ export class NavGrid {
   }
 
   /**
-   * Pushes a circle out of any solid tile it overlaps. Axis-separated so the
-   * body slides along walls instead of sticking - the classic arcade feel.
+   * Pushes a circle out of any solid tile or obstacle it overlaps. Axis-
+   * separated so the body slides along walls instead of sticking - the classic
+   * arcade feel. Obstacles go first in each pass and tiles second, so whatever
+   * a crate shoves the body into, a wall still gets the last word.
    */
   resolveCircle(
     x: number,
@@ -103,39 +206,60 @@ export class NavGrid {
     let px = x;
     let pz = z;
     let hitWall = false;
+    const r2 = r * r;
+
+    /** Shortest push that takes the circle out of a box, or nothing. */
+    const eject = (left: number, top: number, w: number, h: number): boolean => {
+      const cx = Math.max(left, Math.min(px, left + w));
+      const cz = Math.max(top, Math.min(pz, top + h));
+      let dx = px - cx;
+      let dz = pz - cz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= r2) return false;
+      if (d2 > 1e-8) {
+        const d = Math.sqrt(d2);
+        px += (dx / d) * (r - d);
+        pz += (dz / d) * (r - d);
+      } else {
+        // Dead inside: eject along the shallowest axis.
+        dx = px - (left + w / 2);
+        dz = pz - (top + h / 2);
+        if (Math.abs(dx) / w > Math.abs(dz) / h) px += dx > 0 ? w / 2 + r : -(w / 2 + r);
+        else pz += dz > 0 ? h / 2 + r : -(h / 2 + r);
+      }
+      return true;
+    };
 
     for (let pass = 0; pass < 2; pass++) {
+      this.pass++;
       const minTx = Math.floor((px - r) / TILE);
       const maxTx = Math.floor((px + r) / TILE);
       const minTz = Math.floor((pz - r) / TILE);
       const maxTz = Math.floor((pz + r) / TILE);
 
+      if (this.buckets.size) {
+        for (let tz = minTz; tz <= maxTz; tz++) {
+          for (let tx = minTx; tx <= maxTx; tx++) {
+            const list = this.buckets.get(this.idx(tx, tz));
+            if (!list) continue;
+            for (const i of list) {
+              if (this.seen[i] === this.pass) continue;
+              this.seen[i] = this.pass;
+              const o = this.obstacles[i];
+              if (o.active) eject(o.x - o.hx, o.z - o.hz, o.hx * 2, o.hz * 2);
+            }
+          }
+        }
+      }
+      for (const o of this.movers) {
+        if (o.active) eject(o.x - o.hx, o.z - o.hz, o.hx * 2, o.hz * 2);
+      }
+
       for (let tz = minTz; tz <= maxTz; tz++) {
         for (let tx = minTx; tx <= maxTx; tx++) {
           if (passable && passable.has(this.idx(tx, tz))) continue;
           if (!this.solid(tx, tz)) continue;
-
-          const left = tx * TILE;
-          const top = tz * TILE;
-          const cx = Math.max(left, Math.min(px, left + TILE));
-          const cz = Math.max(top, Math.min(pz, top + TILE));
-          let dx = px - cx;
-          let dz = pz - cz;
-          const d2 = dx * dx + dz * dz;
-          if (d2 >= r * r) continue;
-
-          hitWall = true;
-          if (d2 > 1e-8) {
-            const d = Math.sqrt(d2);
-            px += (dx / d) * (r - d);
-            pz += (dz / d) * (r - d);
-          } else {
-            // Dead centre of a tile: eject along the shallowest axis.
-            dx = px - (left + TILE / 2);
-            dz = pz - (top + TILE / 2);
-            if (Math.abs(dx) > Math.abs(dz)) px += dx > 0 ? r : -r;
-            else pz += dz > 0 ? r : -r;
-          }
+          if (eject(tx * TILE, tz * TILE, TILE, TILE)) hitWall = true;
         }
       }
     }
@@ -321,4 +445,15 @@ export class NavGrid {
     }
     return seen;
   }
+}
+
+/** True when a circle overlaps an axis-aligned box. */
+function boxOverlapsCircle(
+  left: number, top: number, w: number, h: number, x: number, z: number, r: number,
+): boolean {
+  const cx = Math.max(left, Math.min(x, left + w));
+  const cz = Math.max(top, Math.min(z, top + h));
+  const dx = x - cx;
+  const dz = z - cz;
+  return dx * dx + dz * dz < r * r;
 }

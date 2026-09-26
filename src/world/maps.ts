@@ -27,6 +27,8 @@ export const MAPS: Record<MapId, MapProfile> = {
     corridorLook: 'corridor',
     windows: [2, 4],
     boxes: 1,
+    traps: 2,
+    trapKinds: ['shock', 'flame'],
   },
   town: {
     id: 'town',
@@ -49,6 +51,8 @@ export const MAPS: Record<MapId, MapProfile> = {
     },
     windows: [2, 5],
     boxes: 2,
+    traps: 3,
+    trapKinds: ['shock'],
   },
   foundry: {
     id: 'foundry',
@@ -72,6 +76,8 @@ export const MAPS: Record<MapId, MapProfile> = {
     },
     windows: [2, 5],
     boxes: 2,
+    traps: 3,
+    trapKinds: ['flame', 'shock'],
   },
   labs: {
     id: 'labs',
@@ -95,5 +101,7 @@ export const MAPS: Record<MapId, MapProfile> = {
     },
     windows: [2, 4],
     boxes: 2,
+    traps: 3,
+    trapKinds: ['shock', 'flame'],
   },
 };

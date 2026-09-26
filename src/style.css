@@ -441,36 +441,6 @@ html, body {
   text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000, 0 0 6px var(--blood);
 }
 
-/* The objective marker: a diamond over the target, pinned to the edge when off screen. */
-#waypoint {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0;
-  height: 0;
-  color: #7affd0;
-  font-size: 11px;
-  letter-spacing: 0.1em;
-}
-#waypoint i {
-  position: absolute;
-  left: -7px;
-  top: -7px;
-  width: 14px;
-  height: 14px;
-  border: 2px solid currentColor;
-  transform: rotate(45deg);
-  box-shadow: 0 0 8px currentColor;
-}
-#waypoint span {
-  position: absolute;
-  left: -40px;
-  top: 12px;
-  width: 80px;
-  text-align: center;
-}
-#waypoint.edge i { background: currentColor; opacity: 0.8; }
-
 #minimap {
   position: absolute;
   right: 22px;

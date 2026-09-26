@@ -1,6 +1,13 @@
 /**
  * The furniture shop: helpers for placing pieces in a room and the pieces
  * themselves, shared by every map's set dressing.
+ *
+ * Pieces also declare themselves solid, and they do it without anyone having
+ * to remember to: `pieceAt` watches the boxes a piece emits and keeps the ones
+ * with real bulk at body height - a mattress, a workbench, a stack of crates -
+ * then hands the room one box on the floor for the lot. Thin things (a privacy
+ * screen, a drip stand, paper on the ground) never reach the threshold, so the
+ * arena keeps its clean lines while the furniture you can see stops a body.
  */
 
 import * as THREE from 'three';
@@ -20,6 +27,9 @@ import {
   tileCenter,
 } from './mapdata.ts';
 
+/** A box on the floor nothing can walk through. Half-extents, world units. */
+export type Solid = { x: number; z: number; hx: number; hz: number };
+
 export type Room = {
   b: Batcher;
   zone: ZoneDef;
@@ -28,7 +38,22 @@ export type Room = {
   rng: Rng;
   amb: THREE.Color;
   claimed: Set<number>;
+  /** Where the furniture stops a body. Filled in as pieces are placed. */
+  solids: Solid[];
 };
+
+/** Nothing is allowed to be wider than this, so no one piece walls a room off. */
+const SOLID_CAP = 2.0;
+/** A box only counts as furniture if it is this chunky, at about this height. */
+const SOLID_MIN_THIN = 0.4;
+const SOLID_MIN_WIDE = 0.8;
+const SOLID_LOW = 0.25;
+const SOLID_HIGH = 2.3;
+
+/** Registers a solid box on the floor directly, for pieces built without `piece`. */
+export function solidBox(r: Room, x: number, z: number, hx: number, hz: number): void {
+  r.solids.push({ x, z, hx: Math.min(SOLID_CAP, hx), hz: Math.min(SOLID_CAP, hz) });
+}
 
 export type Put = (spec: MatSpec, sx: number, sy: number, sz: number, x: number, y: number, z: number, ry?: number, rx?: number, rz?: number) => void;
 
@@ -112,9 +137,30 @@ export function pieceAt(r: Room, cx: number, cz: number, facing: number, build: 
       r.lighting.add({ x: wx(x, z), y, z: wz(x, z), color: new THREE.Color(color), intensity, radius });
     },
   };
+  // The bounding box of everything solid this piece puts at body height.
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
   build((spec, sx, sy, sz, x, y, z, ry = 0, rx = 0, rz = 0) => {
     r.b.box(spec, r.amb, sx, sy, sz, wx(x, z), y, wz(x, z), facing + ry, rx, rz);
+    const chunky = Math.min(sx, sz) >= SOLID_MIN_THIN && Math.max(sx, sz) >= SOLID_MIN_WIDE;
+    if (!chunky || y - sy / 2 > SOLID_HIGH || y + sy / 2 < SOLID_LOW) return;
+    const a = facing + ry;
+    const ex = Math.abs(Math.cos(a)) * sx / 2 + Math.abs(Math.sin(a)) * sz / 2;
+    const ez = Math.abs(Math.sin(a)) * sx / 2 + Math.abs(Math.cos(a)) * sz / 2;
+    const bx = wx(x, z);
+    const bz = wz(x, z);
+    minX = Math.min(minX, bx - ex);
+    maxX = Math.max(maxX, bx + ex);
+    minZ = Math.min(minZ, bz - ez);
+    maxZ = Math.max(maxZ, bz + ez);
   }, kit);
+  if (minX > maxX) return;
+  // Pulled in a little, so a body brushes past furniture rather than snagging.
+  const hx = Math.min(SOLID_CAP, (maxX - minX) / 2) * 0.92;
+  const hz = Math.min(SOLID_CAP, (maxZ - minZ) / 2) * 0.92;
+  if (hx > 0.25 && hz > 0.25) r.solids.push({ x: (minX + maxX) / 2, z: (minZ + maxZ) / 2, hx, hz });
 }
 
 /** The tile in front of a wall tile, one step into the room. */
@@ -407,6 +453,7 @@ export function generatorUnit(r: Room, tx: number, tz: number, facing: number): 
 
 export function drum(r: Room, x: number, z: number): void {
   const col = r.rng.pick([0x8a2a1a, 0x9a7a1a, 0x2a4a6a]);
+  solidBox(r, x, z, 0.7, 0.7);
   r.b.cylinder(M.flat(col), r.amb, 0.75, 0.75, 2.0, 8, x, 1.0, z);
   r.b.cylinder(M.flat(0x2a2a2a), r.amb, 0.78, 0.78, 0.1, 8, x, 1.4, z);
   r.b.cylinder(M.flat(0x2a2a2a), r.amb, 0.78, 0.78, 0.1, 8, x, 0.6, z);

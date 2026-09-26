@@ -236,8 +236,12 @@ export function boxWeights(exclude: readonly string[] = []): number[] {
 
 /** Pack-a-Punch goes three tiers deep. */
 export const PAP_MAX = 3;
-/** Cost to go from tier i to tier i + 1. */
-export const PAP_COSTS = [5000, 7500, 10000];
+/**
+ * Cost to go from tier i to tier i + 1. Tier I used to be 5000, which on this
+ * round curve meant plenty of runs never saw a packed gun at all; at 3000 the
+ * first upgrade lands about when the wall guns stop keeping up.
+ */
+export const PAP_COSTS = [3000, 5000, 7000];
 
 export function papCost(tier: number): number {
   return PAP_COSTS[Math.min(PAP_COSTS.length - 1, Math.max(0, tier))];

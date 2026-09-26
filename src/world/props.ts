@@ -1,6 +1,10 @@
 /**
  * Interactive furniture: doors, window barricades, perk machines, the mystery
- * box, wall buys, the power switch and Pack-a-Punch.
+ * box, wall buys, traps, the power switch and Pack-a-Punch.
+ *
+ * Anything with real bulk also reports a `footprint`: the box it takes up on
+ * the floor, which the game hands to the nav grid so neither the player nor
+ * the horde walks through a vending machine any more.
  *
  * Every wall-standing prop is authored with its front on local +z and placed
  * with the layout's `facing`, which points into the room. Each prop is tinted
@@ -18,6 +22,8 @@ import {
   type BarricadeDef,
   type DoorDef,
   type Layout,
+  type TrapDef,
+  type TrapKind,
   type WallProp,
   tileCenter,
 } from './mapdata.ts';
@@ -100,6 +106,23 @@ function againstWall(p: WallProp, inset: number): THREE.Vector3 {
   const nx = Math.sin(p.facing);
   const nz = Math.cos(p.facing);
   return new THREE.Vector3(c.x - nx * (TILE / 2 - inset), 0, c.z - nz * (TILE / 2 - inset));
+}
+
+/** The box a prop takes up on the floor, in world units. Half-extents. */
+export type Footprint = { x: number; z: number; hx: number; hz: number };
+
+/**
+ * Footprint of a wall-standing prop whose model is `sx` wide and `sz` deep in
+ * its own frame. Facings are always cardinal, so the box only ever swaps axes.
+ */
+function wallFootprint(p: WallProp, inset: number, sx: number, sz: number): Footprint {
+  const pos = againstWall(p, inset);
+  const alongZ = Math.abs(Math.cos(p.facing)) > 0.5;
+  return {
+    x: pos.x, z: pos.z,
+    hx: (alongZ ? sx : sz) / 2,
+    hz: (alongZ ? sz : sx) / 2,
+  };
 }
 
 /* ------------------------------------------------------------------ doors */
@@ -252,6 +275,7 @@ export class PerkMachine {
   readonly id: PerkId;
   readonly group: THREE.Group;
   readonly center: THREE.Vector3;
+  readonly footprint: Footprint;
   readonly light: THREE.PointLight;
   private readonly signMat: THREE.MeshBasicMaterial;
   private readonly faceMat: THREE.MeshBasicMaterial;
@@ -292,6 +316,7 @@ export class PerkMachine {
     this.group.add(this.light);
 
     const pos = againstWall(p, 0.9);
+    this.footprint = wallFootprint(p, 0.9, 2.2, 1.4);
     this.group.position.copy(pos);
     this.group.rotation.y = p.facing;
     this.roomLight = tintByLight(this.group, probe, c.x, c.z);
@@ -328,6 +353,8 @@ export class PerkMachine {
 export class MysteryBox {
   readonly group: THREE.Group;
   center = new THREE.Vector3();
+  /** Where the crate sits on the floor right now; the game keeps the grid in step. */
+  footprint: Footprint = { x: 0, z: 0, hx: 1.3, hz: 0.9 };
   padIndex = 0;
   private readonly body = new THREE.Group();
   private readonly lid: THREE.Group;
@@ -423,6 +450,7 @@ export class MysteryBox {
 
   moveTo(p: WallProp, padIndex: number, probe: LightProbe): void {
     const pos = againstWall(p, 1.2);
+    this.footprint = wallFootprint(p, 1.2, 2.6, 1.8);
     this.group.position.copy(pos);
     this.group.rotation.y = p.facing;
     const c = tileCenter(p.tx, p.tz);
@@ -555,6 +583,7 @@ export class WallBuy {
 export class PowerSwitch {
   readonly group: THREE.Group;
   readonly center: THREE.Vector3;
+  readonly footprint: Footprint;
   private readonly lever: THREE.Group;
   private readonly lamp: THREE.MeshBasicMaterial;
   on = false;
@@ -563,6 +592,7 @@ export class PowerSwitch {
     this.group = new THREE.Group();
     const c = tileCenter(p.tx, p.tz);
     this.group.position.copy(againstWall(p, 0.2));
+    this.footprint = wallFootprint(p, 0.2, 2.8, 0.9);
     this.group.rotation.y = p.facing;
     this.center = new THREE.Vector3(c.x, 2.2, c.z);
 
@@ -609,6 +639,7 @@ export class PowerSwitch {
 export class PackMachine {
   readonly group = new THREE.Group();
   readonly center: THREE.Vector3;
+  readonly footprint: Footprint;
   private readonly drum: THREE.Mesh;
   private readonly glowMat: THREE.MeshBasicMaterial;
   private readonly light: THREE.PointLight;
@@ -649,6 +680,7 @@ export class PackMachine {
     this.group.add(this.light);
 
     this.group.position.copy(againstWall(p, 1.1));
+    this.footprint = wallFootprint(p, 1.1, 3.4, 2.2);
     this.group.rotation.y = p.facing;
     tintByLight(this.group, probe, c.x, c.z);
   }
@@ -684,6 +716,214 @@ export class PackMachine {
   }
 }
 
+
+/* ------------------------------------------------------------------ traps */
+
+/**
+ * A trap: a hazard-striped panel on the wall with a lever, and a pylon either
+ * side of it. Pay and throw the lever and the stretch of floor between the
+ * pylons cooks anything that walks into it for half a minute; then it has to
+ * cool down before it will take your money again. The arcs and the flame
+ * itself are drawn by the game, which owns the particles and the bolts.
+ */
+export class TrapProp {
+  readonly def: TrapDef;
+  readonly group = new THREE.Group();
+  /** The lever, for the interaction prompt. */
+  readonly center: THREE.Vector3;
+  /** Middle of the killing floor, and how wide it reaches. */
+  readonly zone: THREE.Vector3;
+  readonly radius: number;
+  /** The tops of the two pylons, for arcs to jump between. */
+  readonly emitters: THREE.Vector3[] = [];
+  readonly solids: Footprint[] = [];
+  private readonly lampMat: THREE.MeshBasicMaterial;
+  private readonly coilMats: THREE.MeshBasicMaterial[] = [];
+  private readonly lever: THREE.Group;
+  private readonly light: THREE.PointLight;
+  powered = false;
+  /** Running, cooling off, or sitting there waiting to be paid. */
+  state: 'ready' | 'live' | 'cooling' = 'ready';
+  timer = 0;
+
+  constructor(def: TrapDef, probe: LightProbe) {
+    this.def = def;
+    const c = tileCenter(def.tx, def.tz);
+    const nx = Math.sin(def.facing);
+    const nz = Math.cos(def.facing);
+    // Along the wall: the perpendicular of the facing.
+    const ax = nz;
+    const az = -nx;
+    this.center = new THREE.Vector3(c.x, 2.2, c.z);
+    this.zone = new THREE.Vector3(c.x + nx * TILE * 0.95, 0, c.z + nz * TILE * 0.95);
+    this.radius = 4.6;
+
+    const tex = textures();
+    const panel = new THREE.Group();
+    const back = new THREE.Mesh(new THREE.BoxGeometry(2.4, 3.2, 0.35), new THREE.MeshLambertMaterial({ map: tex.metalDark }));
+    back.position.set(0, 2.3, 0.17);
+    panel.add(back);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.5, 0.38), new THREE.MeshLambertMaterial({ map: tex.hazard }));
+    stripe.position.set(0, 0.95, 0.17);
+    panel.add(stripe);
+
+    this.lampMat = new THREE.MeshBasicMaterial({ color: 0x3a1a10 });
+    const bulb = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.44, 0.2), this.lampMat);
+    bulb.position.set(-0.75, 3.5, 0.38);
+    panel.add(bulb);
+
+    this.lever = new THREE.Group();
+    this.lever.position.set(0.45, 2.3, 0.4);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.2, 0.16), flatMaterial(0x8b949e));
+    arm.position.y = 0.5;
+    this.lever.add(arm);
+    const knob = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.38, 0.38), flatMaterial(0xc4402a));
+    knob.position.y = 1.1;
+    this.lever.add(knob);
+    this.lever.rotation.x = -0.85;
+    panel.add(this.lever);
+
+    panel.position.copy(againstWall(def, 0.2));
+    panel.rotation.y = def.facing;
+    this.group.add(panel);
+
+    // A pylon either side, standing clear of the panel and facing each other.
+    const shock = def.kind === 'shock';
+    for (const side of [-1, 1] as const) {
+      const pylon = new THREE.Group();
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 0.4, 8), new THREE.MeshLambertMaterial({ map: tex.metal }));
+      base.position.y = 0.2;
+      pylon.add(base);
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(shock ? 0.26 : 0.34, shock ? 0.32 : 0.4, shock ? 3.2 : 2.2, 8),
+        new THREE.MeshLambertMaterial({ map: tex.metalDark }),
+      );
+      post.position.y = shock ? 1.8 : 1.3;
+      pylon.add(post);
+      if (shock) {
+        // Copper rings and an insulator crown.
+        for (const y of [1.2, 2.1]) {
+          const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.44, 0.18, 8), flatMaterial(0x9a6a2a));
+          ring.position.y = y;
+          pylon.add(ring);
+        }
+        const coil = new THREE.MeshBasicMaterial({ color: 0x14202a });
+        this.coilMats.push(coil);
+        const ball = new THREE.Mesh(new THREE.OctahedronGeometry(0.5, 0), coil);
+        ball.position.y = 3.6;
+        ball.userData.keepColor = true;
+        pylon.add(ball);
+      } else {
+        // A burner head, tilted in toward the middle of the zone.
+        const head = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.44, 1.0, 8), flatMaterial(0x4a4038));
+        head.position.set(0, 2.6, 0);
+        head.rotation.z = -side * 0.5;
+        pylon.add(head);
+        const mouth = new THREE.MeshBasicMaterial({ color: 0x2a1408 });
+        this.coilMats.push(mouth);
+        const flame = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 0.3, 6), mouth);
+        flame.position.set(side * 0.24, 3.05, 0);
+        flame.userData.keepColor = true;
+        pylon.add(flame);
+      }
+      const px = c.x + ax * side * 2.9 - nx * (TILE / 2 - 0.9);
+      const pz = c.z + az * side * 2.9 - nz * (TILE / 2 - 0.9);
+      pylon.position.set(px, 0, pz);
+      pylon.rotation.y = def.facing;
+      this.group.add(pylon);
+      this.solids.push({ x: px, z: pz, hx: 0.7, hz: 0.7 });
+      this.emitters.push(new THREE.Vector3(px, shock ? 3.6 : 3.0, pz));
+    }
+
+    this.light = new THREE.PointLight(shock ? 0x8fd8ff : 0xff8a3a, 0, 20, 2);
+    this.light.position.set(this.zone.x, 2.6, this.zone.z);
+    this.group.add(this.light);
+
+    tintByLight(this.group, probe, c.x, c.z);
+    this.setPowered(false);
+  }
+
+  get kind(): TrapKind {
+    return this.def.kind;
+  }
+
+  /** True when a body standing here is in the cooking. */
+  catches(x: number, z: number): boolean {
+    const dx = x - this.zone.x;
+    const dz = z - this.zone.z;
+    return dx * dx + dz * dz < this.radius * this.radius;
+  }
+
+  setPowered(on: boolean): void {
+    this.powered = on;
+    if (!on) {
+      this.state = 'ready';
+      this.timer = 0;
+    }
+    this.sync();
+  }
+
+  fire(seconds: number): void {
+    this.state = 'live';
+    this.timer = seconds;
+    this.sync();
+  }
+
+  /** Runs the clock down. Returns true on the frame it switches itself off. */
+  update(dt: number, cooldown: number): boolean {
+    if (this.timer <= 0) return false;
+    this.timer -= dt;
+    if (this.timer > 0) return false;
+    if (this.state === 'live') {
+      this.state = 'cooling';
+      this.timer = cooldown;
+      this.sync();
+      return true;
+    }
+    this.state = 'ready';
+    this.timer = 0;
+    this.sync();
+    return false;
+  }
+
+  reset(): void {
+    this.state = 'ready';
+    this.timer = 0;
+    this.setPowered(false);
+  }
+
+  get live(): boolean {
+    return this.state === 'live';
+  }
+
+  private sync(): void {
+    const live = this.state === 'live';
+    const hot = this.kind === 'shock' ? 0x8fd8ff : 0xff8a3a;
+    this.lever.rotation.x = live ? 0.85 : -0.85;
+    this.lampMat.color.set(!this.powered ? 0x3a1a10 : live ? 0x40ff90 : this.state === 'cooling' ? 0xffa03a : 0xffe14d);
+    if (this.powered) this.lampMat.color.multiplyScalar(2.4);
+    for (const m of this.coilMats) {
+      m.color.set(live ? hot : 0x14202a);
+      if (live) m.color.multiplyScalar(3);
+    }
+    this.light.intensity = live ? 26 : 0;
+  }
+
+  animate(t: number): void {
+    if (this.state !== 'live') return;
+    const flicker = 0.75 + 0.25 * Math.sin(t * (this.kind === 'shock' ? 31 : 17));
+    this.light.intensity = 26 * flicker;
+    // The last three seconds stutter, so you can hear it running out.
+    if (this.timer < 3) this.light.intensity *= 0.4 + 0.6 * Math.abs(Math.sin(t * 9));
+  }
+
+  dispose(): void {
+    this.lampMat.dispose();
+    for (const m of this.coilMats) m.dispose();
+    disposeOwned(this.group);
+  }
+}
+
 /* ----------------------------------------------------------------- build */
 
 export type PropSet = {
@@ -691,6 +931,7 @@ export type PropSet = {
   barricades: BarricadeProp[];
   machines: PerkMachine[];
   wallBuys: WallBuy[];
+  traps: TrapProp[];
   power: PowerSwitch;
   pack: PackMachine;
 };
@@ -701,9 +942,20 @@ export function buildProps(layout: Layout, probe: LightProbe): PropSet {
     barricades: layout.barricades.map((b) => new BarricadeProp(b, probe)),
     machines: layout.perks.map((p) => new PerkMachine(p.perk as PerkId, p, probe)),
     wallBuys: layout.wallBuys.map((w) => new WallBuy(w.weapon, w, probe)),
+    traps: layout.traps.map((t) => new TrapProp(t, probe)),
     power: new PowerSwitch(layout.powerSwitch, probe),
     pack: new PackMachine(layout.pack, probe),
   };
+}
+
+/** Every solid box the props put on the floor, for the collision grid. */
+export function propSolids(p: PropSet): Footprint[] {
+  return [
+    ...p.machines.map((m) => m.footprint),
+    ...p.traps.flatMap((t) => t.solids),
+    p.power.footprint,
+    p.pack.footprint,
+  ];
 }
 
 /** Everything a prop set added to the scene, and the GPU memory it owns. */
@@ -713,6 +965,7 @@ export function propGroups(p: PropSet): THREE.Object3D[] {
     ...p.barricades.map((b) => b.group),
     ...p.machines.map((m) => m.group),
     ...p.wallBuys.map((w) => w.group),
+    ...p.traps.map((t) => t.group),
     p.power.group,
     p.pack.group,
   ];
@@ -723,6 +976,7 @@ export function disposeProps(p: PropSet): void {
   for (const b of p.barricades) disposeOwned(b.group);
   for (const m of p.machines) m.dispose();
   for (const w of p.wallBuys) w.dispose();
+  for (const t of p.traps) t.dispose();
   p.power.dispose();
   p.pack.showWeapon(null);
   p.pack.dispose();

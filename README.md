@@ -91,6 +91,14 @@ uses Pointer Lock, so it needs a desktop browser.
 | `M` | Mute |
 | `Esc` | Pause (settings are in the pause menu; `Esc` backs out) |
 
+Every key in that table except `Esc` can be rebound under **SETTINGS →
+CONTROLS**: click a key, press the one you want. A key already doing another job
+is taken off it, so a binding never does two things at once, and an action left
+with nothing falls back to its default. Esc stays put because it is the way out
+of every screen in the game. Bindings are saved with the rest of the settings,
+and the in-game prompts and the HOW TO PLAY list are written from them, so
+neither can go stale after a rebind.
+
 ## The story
 
 Vireo Pharmaceuticals made Compound L — "Lazarus" — to stop people dying. They
@@ -213,6 +221,11 @@ your monitor is. **Brightness**, FOV, sensitivity, Y-invert, volume and a
 separate **music** volume are also adjustable and persist, and the enemy health
 bars and damage numbers can each be switched off.
 
+**Screen shake** and **view sway** each have their own slider. Explosions, boss
+slams and the bigger guns all kick the camera, and the walk has a bob on it,
+which is a lot of movement for anyone it makes ill. If the browser reports
+`prefers-reduced-motion`, both start at zero and can be turned back up.
+
 ## Project layout
 
 ```
@@ -221,7 +234,7 @@ src/
   style.css            HUD and menu styling (CRT treatment)
   core/
     retro.ts           HDR render target + tone curve, bloom, dither, scanlines
-    input.ts           keyboard + mouse + pointer lock
+    input.ts           keyboard + mouse + pointer lock, and the rebindable key map
     audio.ts           procedural Web Audio: guns, voices, foley, HRTF panning, announcer
     music.ts           the arcade chiptune, sequenced and synthesised live
     voice.ts           loads the recorded lines; how often the player speaks
@@ -264,10 +277,11 @@ src/
     tags.ts            health bars and damage numbers over the horde
     game.ts            the loop that ties it together
 test/
-  logic.test.ts        59 unit tests over the pure half of the game
-  browser-smoke.mjs    185 checks driving the real game in headless Chromium
+  logic.test.ts        69 unit tests over the pure half of the game
+  browser-smoke.mjs    213 checks driving the real game in headless Chromium
 tools/
   mapcheck.mjs         prints a generated layout as ASCII, or sweeps many seeds
+  hudcost.mjs          times a frame with the HUD painted once a frame vs per step
   diag.mjs             screenshots every room of a seed, the horde and a reload
   story.mjs            screenshots the menus, quest props and every boss
   guns.mjs             contact sheets of every weapon: hip, sights, reload
@@ -440,15 +454,34 @@ casings and power-up drops are all pooled and built once in the constructor.
 Each zombie's static boxes are merged per joint, so a body costs under twenty
 draw calls however much detail it carries.
 
+**The simulation and the picture run on different clocks.** The world steps at a
+fixed 120 Hz, up to eight steps a frame, so the physics and the horde behave the
+same however fast the machine is. Presentation - the HUD, the bars and numbers
+over the horde, the objective marker and the minimap - is DOM and canvas work
+whose only consumer is the screen, so the frame loop paints it once per drawn
+frame instead. Doing it per step painted it two to four times over, and because
+the tags measure the window after writing eighty inline styles, each repeat cost
+a forced layout; worse, the cost grew with the number of steps a frame took, so
+a frame that was already late did the most redundant work. `Game.present()` owns
+that pass, and `npm run hudcost` measures what it is worth.
+
+**Damage tells you where it came from.** Being surrounded is the whole game, so
+a hit puts a wedge on the ring around the crosshair at the bearing of whatever
+landed it - straight up is dead ahead, so a bite from behind lands under your
+feet, where you look for it. Swings, shockwaves and thrown things all carry a
+position; your own grenade and burning ground you are standing in have no
+direction worth pointing at, and get the red vignette on its own.
+
 ## Verification
 
 ```bash
 npm run typecheck     # tsc --noEmit, strict, erasableSyntaxOnly
-npm test              # 59 unit tests (node:test, runs .ts directly)
+npm test              # 69 unit tests (node:test, runs .ts directly)
 npm run map           # prints a random asylum and validates it
 npm run map -- --map=labs --sweep 1000   # generates and validates a thousand seeds
 npm run build         # type-check + bundle
-npm run test:browser  # builds, then runs 185 checks in real headless Chromium
+npm run test:browser  # builds, then runs 213 checks in real headless Chromium
+npm run hudcost       # what the HUD costs per frame, painted once a frame vs per step
 ```
 
 `npm test` covers the pure half: that 300 generated asylums, and sixty of
@@ -468,7 +501,12 @@ bigger and meaner than the one before without ever running the enemy pool dry,
 that the valve spots stay out of the start room, that escaping or reaching
 round 15 unlocks the next map and nothing else, that every chapter has a
 boss and something to say at every beat its jobs produce, and that bosses get
-tougher chapter by chapter and round by round.
+tougher chapter by chapter and round by round. It also covers the two things
+read back off disk: that every action has a default key, that no key does two
+jobs out of the box and that the game will not hand over the ones it or the
+browser needs; and that saved progress survives being nonsense - a record with
+a string where a round should be, an escape time with no escape behind it, a
+map that no longer exists - rather than putting NaN onto the chapter cards.
 
 `npm run test:browser` is the one that matters for "does it actually work". It
 builds, serves `dist/`, opens it in headless Chromium with software WebGL, and
@@ -507,10 +545,31 @@ story on the asylum — objectives, marker and radio, power, the three parts,
 the build, the boss arriving through a window with its health bar, surviving
 a nuke, dying, the exit opening, the victory screen and the next chapter
 unlocking; sets each of the four bosses on an idle player and checks it
-arrives, uses its moves and hurts; and walks the chapter select, a locked
-chapter and a briefing — then asserts no console or page errors throughout.
+arrives, uses its moves and hurts; walks the chapter select, a locked
+chapter and a briefing; hits the player from each of the four quarters and from
+a turned-around stance and checks the damage wedge points the right way, and
+that damage with no direction shows none; drives the rebinding panel the way a
+player would — click the row, press the key — and checks the key comes off
+whatever else had it, that Esc cancels the rebind instead of closing the screen,
+that the HOW TO PLAY list follows along, that the binding is saved and that a
+reset clears it; and turns the screen shake down and checks the camera holds
+still, then feeds the settings loader a stored file full of nonsense and checks
+nothing infinite reaches the camera — then asserts no console or page errors
+throughout.
 
 It needs Chromium once: `npx playwright install chromium`.
+
+`npm run hudcost` measures what the HUD costs per frame. Presentation is DOM and
+canvas work and the frame loop paints it once per drawn frame, not once per
+simulation step; this stands a crowd around the player with the minimap open and
+times a frame both ways. The saving is a fraction of a millisecond, so it times
+the two arrangements in short alternating trials and takes the median of each -
+timing one and then the other picks up drift several times larger than the
+difference. Under software WebGL at round 9 with twenty zombies up it reports no
+difference at one step a frame (the same work either way), about 0.14 ms at two,
+and about 0.43 ms at four, where the redundant painting was more than doubling
+the cost of the frame. That shape is the point: a frame only takes four steps
+when it is already behind.
 
 `tools/diag.mjs [seed] [--map=town]` writes screenshots to `tools/shots/<map>/`
 - one per room of that seed's layout, a window, the horde, hounds and a
@@ -556,6 +615,17 @@ asked:
   colour-correct renderer keep sensitivity, volume, FOV and Y-invert, but start
   on the new default graphics preset, since the old default was tuned for a
   picture that was far too dark.
+- **Esc is not rebindable.** It is the way out of every screen in the game, and
+  the browser gives it up out of pointer lock anyway, so handing it to another
+  action would leave a player with no way back to the menu.
+- **A rebind replaces every key for that action**, rather than editing a primary
+  and an alternate separately. It costs the arrow keys and the second shift if
+  you rebind movement or sprint, but one click and one keypress is the whole
+  interaction, and RESET TO DEFAULTS brings the alternates back.
+- **A lost WebGL context asks for a reload** rather than rebuilding itself. Every
+  texture, mesh and baked light is generated at load, so there is nothing cached
+  to re-upload; restoring it would mean re-running the whole build, which is
+  most of the loading time, for a case that should not happen.
 
 ## Licence
 

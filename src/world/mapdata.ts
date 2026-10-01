@@ -84,6 +84,8 @@ export type MapProfile = {
   startThemes: ThemeId[];
   powerTheme: ThemeId;
   themes: ThemeId[];
+  /** Themes every run of this map has, however few rooms it rolls. */
+  mustHave?: ThemeId[];
   corridorLook: CorridorLook;
   /** Room names that differ on this map, by theme. */
   names?: Partial<Record<ThemeId, string[]>>;
@@ -566,6 +568,16 @@ function tryGenerate(seed: number, rng: Rng, profile: MapProfile): Layout | null
     if (themes.has(id)) continue;
     if (!pool.length) pool = shuffle(rng, [...profile.themes]);
     themes.set(id, pool.shift() as ThemeId);
+  }
+  // A small layout can shuffle a map's signature room out: put it back in
+  // place of a room whose theme turns up more than once, or any spare room.
+  for (const must of profile.mustHave ?? []) {
+    if ([...themes.values()].includes(must)) continue;
+    const spare = roomIds.filter((id) => id !== startCell && id !== powerCell && !profile.mustHave?.includes(themes.get(id) as ThemeId));
+    if (!spare.length) return null;
+    const count = (t: ThemeId): number => [...themes.values()].filter((x) => x === t).length;
+    const doubled = spare.filter((id) => count(themes.get(id) as ThemeId) > 1);
+    themes.set(rng.pick(doubled.length ? doubled : spare), must);
   }
 
   const usedNames = new Set<string>();

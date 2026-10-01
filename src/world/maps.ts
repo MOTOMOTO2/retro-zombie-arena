@@ -68,6 +68,8 @@ export const MAPS: Record<MapId, MapProfile> = {
     startThemes: ['loading'],
     powerTheme: 'generator',
     themes: ['foundry', 'warehouse', 'yard', 'furnace', 'armory', 'records', 'foundry', 'warehouse'],
+    // The container yard is the only open sky here.
+    mustHave: ['yard'],
     corridorLook: 'service',
     names: {
       generator: ['TURBINE HALL', 'BOILER HOUSE'],

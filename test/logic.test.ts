@@ -444,6 +444,17 @@ describe('maps', () => {
     }
   });
 
+  it('every run has the rooms its map must have', () => {
+    for (const id of MAP_ORDER) {
+      for (const must of MAPS[id].mustHave ?? []) {
+        for (let seed = 1; seed <= 300; seed++) {
+          const L = generateLayout(seed * 7919, MAPS[id]);
+          assert.ok(L.zones.some((z) => z.theme === must), `${id} seed ${seed * 7919}: no ${must}`);
+        }
+      }
+    }
+  });
+
   it('the new maps are much bigger than the asylum', () => {
     const floorOf = (id: keyof typeof MAPS): number => {
       let total = 0;

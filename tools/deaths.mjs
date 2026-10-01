@@ -25,7 +25,7 @@ const server = createServer(async (req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 await mkdir('tools/shots', { recursive: true });
-const browser = await chromium.launch({ headless: true, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+const browser = await chromium.launch({ channel: 'chromium', headless: true, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
 const page = await browser.newPage({ viewport: { width: 960, height: 600 } });
 page.on('pageerror', (e) => console.log('PAGEERR', String(e).slice(0, 300)));
 await page.goto(`http://127.0.0.1:${server.address().port}/`, { waitUntil: 'load' });

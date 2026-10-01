@@ -32,6 +32,7 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 await mkdir(OUT, { recursive: true });
 
 const browser = await chromium.launch({
+  channel: 'chromium',
   headless: true,
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });

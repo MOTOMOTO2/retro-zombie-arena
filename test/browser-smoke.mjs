@@ -60,6 +60,7 @@ function check(name, ok, detail = '') {
 
 const { server, port } = await serve();
 const browser = await chromium.launch({
+  channel: 'chromium',
   headless: true,
   args: [
     '--use-gl=angle',

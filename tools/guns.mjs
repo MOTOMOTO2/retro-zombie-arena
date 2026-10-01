@@ -34,6 +34,7 @@ const port = server.address().port;
 await mkdir('tools/shots/guns', { recursive: true });
 
 const browser = await chromium.launch({
+  channel: 'chromium',
   headless: true,
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });
